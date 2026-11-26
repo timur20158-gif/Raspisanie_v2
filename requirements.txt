@@ -1,0 +1,6 @@
+pyTelegramBotAPI
+APScheduler
+python-docx
+vk-api
+tzdata
+matplotlib
