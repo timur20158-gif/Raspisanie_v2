@@ -252,7 +252,7 @@ def cmd_start(message):
     send_mascot_art(
         message.chat.id,
         'marten_welcome',
-        f'🐾 <b>С возвращением!</b> Куница на связи и готова к работе.\n\n'
+        f'🐾 <b>С возвращением!</b> Яша на связи и готов к работе.\n\n'
         f'<blockquote>{group_info_block}'
         f'👤 <b>Статус:</b> {role_text}\n'
         f'🗓 <b>Авторассылка:</b> {sub_status}\n'
@@ -365,7 +365,7 @@ def handle_menu(message):
     if 'сегодня' in text_lower:
         log_stat_event('today')
         text = get_schedule_text(now_local(), course, group_name, faculty_code=fac_code)
-        is_chill = any(k in text for k in ('свернулась калачиком', 'пар на этот день нет', 'внезапный выходной'))
+        is_chill = any(k in text for k in ('свернулся калачиком', 'пар на этот день нет', 'внезапный выходной'))
         art_key = 'marten_chill' if is_chill else 'marten_classes'
         send_mascot_art(
             user_id,
@@ -379,7 +379,7 @@ def handle_menu(message):
         log_stat_event('tomorrow')
         tomorrow_dt = now_local() + timedelta(days=1)
         text = get_schedule_text(tomorrow_dt, course, group_name, faculty_code=fac_code)
-        is_chill = any(k in text for k in ('свернулась калачиком', 'пар на этот день нет', 'внезапный выходной'))
+        is_chill = any(k in text for k in ('свернулся калачиком', 'пар на этот день нет', 'внезапный выходной'))
         art_key = 'marten_chill' if is_chill else 'marten_classes'
         send_mascot_art(
             user_id,
@@ -1066,7 +1066,7 @@ def _run_scheduled_mailing(day_offset, greeting_line, day_label_genitive, sub_co
 def morning_mailing():
     _run_scheduled_mailing(
         0,
-        '☀️🐾 <b>Доброе утро!</b> Куница принесла расписание пар и ДЗ на сегодня:',
+        '☀️🐾 <b>Доброе утро!</b> Яша принёс расписание пар и ДЗ на сегодня:',
         'сегодня',
         sub_column='sub_morning',
     )
@@ -1075,7 +1075,7 @@ def morning_mailing():
 def evening_mailing():
     _run_scheduled_mailing(
         1,
-        '🌙🐾 <b>Добрый вечер!</b> Куница напоминает о парах и ДЗ на завтра:',
+        '🌙🐾 <b>Добрый вечер!</b> Яша напоминает о парах и ДЗ на завтра:',
         'завтра',
         sub_column='sub_evening',
     )

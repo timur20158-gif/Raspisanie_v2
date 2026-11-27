@@ -2808,9 +2808,9 @@ def build_session_view(group_name, faculty_code=None, can_edit=False):
 
     if not upcoming:
         if passed_cnt > 0:
-            text += '🐾 <i>Все экзамены и зачёты позади — Куница поздравляет с закрытой сессией!</i>'
+            text += '🐾 <i>Все экзамены и зачёты позади — Яша поздравляет с закрытой сессией!</i>'
         else:
-            text += '🐾 <i>Экзамены и зачёты пока не добавлены — Куница на страже, скоро появятся.</i>'
+            text += '🐾 <i>Экзамены и зачёты пока не добавлены — Яша на страже, скоро появятся.</i>'
     else:
         for d_obj, (ex_id, ex_date, ex_time, subj, ex_type, teacher, room) in upcoming:
             left_lbl = _format_days_left_label(d_obj, today)

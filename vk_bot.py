@@ -398,11 +398,11 @@ def get_day_schedule_plain(target_date, fac_code, course, group_name):
     if week_num <= 0 and not replacements:
         lines.append(f'⏳ Учебный год стартует с {core.ACADEMIC_YEAR_START_DATE.strftime("%d.%m.%Y")}.')
     elif day_name == 'Воскресенье' and not replacements:
-        lines.append('🐾 Воскресенье — Куница свернулась калачиком и отдыхает!')
+        lines.append('🐾 Воскресенье — Яша свернулся калачиком и отдыхает!')
     elif week_num in core.PRACTICE_WEEKS.get(group_name, set()) and not replacements:
         lines.append('🛠 На этой неделе у группы проходит практика.')
     elif not rows and not replacements:
-        lines.append('🐾 Куница проверила расписание — пар на этот день нет!')
+        lines.append('🐾 Яша проверил расписание — пар на этот день нет!')
     else:
         for time_slot, subj, l_type, teacher, room in rows:
             lines.append(f'{format_pair_prefix(time_slot)}')
@@ -1258,7 +1258,7 @@ def handle_message(vk, user_id, peer_id, text, raw_payload=None, attachments=Non
         send_vk_msg(
             vk,
             peer_id,
-            '🐾 Привет! Я — Куница-помощник СИ УУНиТ (общая база с Telegram).\n\nВыбери свой факультет:',
+            '🐾 Привет! Я — Яша, помощник СИ УУНиТ (общая база с Telegram).\n\nВыбери свой факультет:',
             keyboard=build_faculties_kb(),
         )
         return
