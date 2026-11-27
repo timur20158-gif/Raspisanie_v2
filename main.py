@@ -42,6 +42,7 @@ from core import (
     invalidate_user_cache,
     is_admin_user,
     is_group_valid,
+    is_session_mode_enabled,
     is_user_starosta,
     log_stat_event,
     now_local,
@@ -256,7 +257,7 @@ def cmd_start(message):
         f'🗓 <b>Авторассылка:</b> {sub_status}\n'
         f'🔔 <b>Уведомления (пары и ДЗ):</b> {notify_status}</blockquote>\n\n'
         f'👇 <i>Выбери нужное действие в меню ниже:</i>',
-        reply_markup=get_main_keyboard(bool(subscribed), starosta_flag, hw_flag),
+        reply_markup=get_main_keyboard(bool(subscribed), starosta_flag, hw_flag, session_mode=(is_session_mode_enabled(fac_code, group_name) if has_valid_group else False)),
         parse_mode='HTML',
     )
 
@@ -575,6 +576,7 @@ def handle_onboarding_and_settings_callbacks(call):
                 subscribed=bool(sub_val),
                 is_starosta=bool(starosta_val),
                 is_hw_manager=bool(hw_val),
+                session_mode=is_session_mode_enabled(fac_code, group_name),
             ),
             parse_mode='HTML',
         )
@@ -701,7 +703,7 @@ def handle_onboarding_and_settings_callbacks(call):
         bot.send_message(
             chat_id,
             '🔄 <b>Главное меню обновлено!</b>',
-            reply_markup=get_main_keyboard(bool(user[2]), starosta_flag, hw_flag),
+            reply_markup=get_main_keyboard(bool(user[2]), starosta_flag, hw_flag, session_mode=is_session_mode_enabled(user[7], user[1])),
             parse_mode='HTML',
         )
         return
@@ -955,29 +957,63 @@ def _run_scheduled_mailing(day_offset, greeting_line, day_label_genitive, sub_co
         )
         users = cursor.fetchall()
 
+    def _get_session_reminder_for_group(f_code, g_name, is_vk=False):
+        eff_f = f_code or infer_faculty_by_group(g_name)
+        with db_connection() as c_s:
+            ex_rows = c_s.execute(
+                'SELECT exam_time, subject_name, exam_type, room, teacher FROM session_exams '
+                'WHERE (faculty = ? OR faculty = "") AND group_name = ? AND exam_date = ? '
+                'ORDER BY exam_time ASC, id ASC',
+                (eff_f, g_name, target_str),
+            ).fetchall()
+        if not ex_rows:
+            return None
+        day_lbl = 'СЕГОДНЯ' if day_offset == 0 else 'ЗАВТРА'
+        if is_vk:
+            lines = [f'🎓 НАПОМИНАНИЕ О СЕССИИ ({day_lbl}, {target_str}) — {g_name}:', '']
+            for ex_t, ex_s, ex_tp, ex_r, ex_tch in ex_rows:
+                t_p = f' • {ex_t}' if ex_t else ''
+                meta = ' · '.join(x for x in [ex_r, ex_tch] if x)
+                lines.append(f'🎯 {ex_s} ({ex_tp or "Экзамен"}){t_p}' + (f' — {meta}' if meta else ''))
+            return '\n'.join(lines)
+        lines = [f'🎓 <b>НАПОМИНАНИЕ О СЕССИИ ({day_lbl}, {target_str})</b>', f'<blockquote>📚 {esc(g_name)}</blockquote>', '']
+        for ex_t, ex_s, ex_tp, ex_r, ex_tch in ex_rows:
+            t_p = f' • <code>{esc(ex_t)}</code>' if ex_t else ''
+            meta = ' · '.join(esc(x) for x in [ex_r, ex_tch] if x)
+            lines.append(f'🎯 <b>{esc(ex_s)}</b> <i>({esc(ex_tp or "Экзамен")})</i>{t_p}' + (f'\n   📍 {meta}' if meta else ''))
+        return '\n'.join(lines)
+
     group_cache = {}
     for u_id, course, group_name, fac_code in users:
         cache_key = (fac_code, course, group_name)
         if cache_key not in group_cache:
-            text = (
-                f'{greeting_line}\n\n'
-                + get_schedule_text(target_dt, course, group_name, faculty_code=fac_code)
-            )
-            kb = get_pagination_keyboard(day_offset, group_name)
-            hw_rows_for_grp = get_homeworks_for_date(group_name, target_str, faculty_code=fac_code)
-            attachments = []
-            for _, hw_subj, hw_text, hw_photo, hw_doc_id, hw_doc_name in hw_rows_for_grp:
-                photo_ids = parse_photo_ids(hw_photo)
-                if photo_ids or hw_doc_id:
-                    cap = (
-                        f'📎 <b>Вложение к ДЗ на {day_label_genitive} ({target_str})</b>\n'
-                        f'📘 <b>{esc(hw_subj)}</b>\n'
-                        f'📝 {esc(hw_text) if hw_text else ""}'
-                    ).strip()
-                    attachments.append((photo_ids, cap, hw_doc_id, hw_doc_name))
-            group_cache[cache_key] = (text, kb, attachments, hw_rows_for_grp)
+            if is_session_mode_enabled(fac_code, group_name):
+                sess_txt = _get_session_reminder_for_group(fac_code, group_name, is_vk=False)
+                group_cache[cache_key] = ('session', sess_txt, None, [], [])
+            else:
+                text = (
+                    f'{greeting_line}\n\n'
+                    + get_schedule_text(target_dt, course, group_name, faculty_code=fac_code)
+                )
+                kb = get_pagination_keyboard(day_offset, group_name)
+                hw_rows_for_grp = get_homeworks_for_date(group_name, target_str, faculty_code=fac_code)
+                attachments = []
+                for _, hw_subj, hw_text, hw_photo, hw_doc_id, hw_doc_name in hw_rows_for_grp:
+                    photo_ids = parse_photo_ids(hw_photo)
+                    if photo_ids or hw_doc_id:
+                        cap = (
+                            f'📎 <b>Вложение к ДЗ на {day_label_genitive} ({target_str})</b>\n'
+                            f'📘 <b>{esc(hw_subj)}</b>\n'
+                            f'📝 {esc(hw_text) if hw_text else ""}'
+                        ).strip()
+                        attachments.append((photo_ids, cap, hw_doc_id, hw_doc_name))
+                group_cache[cache_key] = ('regular', text, kb, attachments, hw_rows_for_grp)
 
-        text, kb, attachments, hw_rows_tmr = group_cache[cache_key]
+        mode_tag, text, kb, attachments, hw_rows_tmr = group_cache[cache_key]
+        if mode_tag == 'session':
+            if text:
+                enqueue_message(u_id, text, parse_mode='HTML')
+            continue
         final_text = text
         if day_offset == 1 and hw_rows_tmr:
             if True:
@@ -1008,9 +1044,16 @@ def _run_scheduled_mailing(day_offset, greeting_line, day_label_genitive, sub_co
             for vk_uid, v_fac, v_crs, v_grp in vk_recipients:
                 v_key = (v_fac, v_crs, v_grp)
                 if v_key not in vk_cache:
-                    v_hws = get_homeworks_for_date(v_grp, target_str, faculty_code=v_fac) if day_offset == 1 else []
-                    vk_cache[v_key] = (f'{vk_greet}\n\n' + vk_bot.get_day_schedule_plain(target_dt, v_fac, v_crs, v_grp), v_hws)
-                vk_msg_txt, hw_rows_vk = vk_cache[v_key]
+                    if is_session_mode_enabled(v_fac, v_grp):
+                        vk_cache[v_key] = ('session', _get_session_reminder_for_group(v_fac, v_grp, is_vk=True), [])
+                    else:
+                        v_hws = get_homeworks_for_date(v_grp, target_str, faculty_code=v_fac) if day_offset == 1 else []
+                        vk_cache[v_key] = ('regular', f'{vk_greet}\n\n' + vk_bot.get_day_schedule_plain(target_dt, v_fac, v_crs, v_grp), v_hws)
+                v_mode, vk_msg_txt, hw_rows_vk = vk_cache[v_key]
+                if v_mode == 'session':
+                    if vk_msg_txt:
+                        core.enqueue_vk_message(vk_uid, vk_msg_txt)
+                    continue
                 if day_offset == 1 and hw_rows_vk:
                     if True:
                         with db_connection() as c_vd:

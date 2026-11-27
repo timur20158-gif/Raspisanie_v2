@@ -34,6 +34,7 @@ from core import (
     get_current_week_and_day,
     get_faculty_short,
     infer_faculty_by_group,
+    is_session_mode_enabled,
     log_stat_event,
     now_local,
     parse_photo_ids,
@@ -802,20 +803,29 @@ def get_free_rooms_plain(day_offset, pair_num, user_fac, scope='fac'):
 
 
 # --- КЛАВИАТУРЫ VK ---
-def build_main_kb(is_starosta=0):
+def build_main_kb(is_starosta=0, session_mode=False):
     kb = VkKeyboard(one_time=False)
-    kb.add_button('📅 Сегодня', color=VkKeyboardColor.PRIMARY)
-    kb.add_button('⏭ Завтра', color=VkKeyboardColor.PRIMARY)
-    kb.add_button('🗓 Неделя', color=VkKeyboardColor.SECONDARY)
-    kb.add_line()
-    kb.add_button('📚 Домашка', color=VkKeyboardColor.POSITIVE)
-    kb.add_button('🎓 Сессия', color=VkKeyboardColor.SECONDARY)
-    kb.add_button('🔍 Поиск', color=VkKeyboardColor.SECONDARY)
+    if session_mode:
+        kb.add_button('🎓 Сессия', color=VkKeyboardColor.PRIMARY)
+        kb.add_button('📚 Домашка', color=VkKeyboardColor.POSITIVE)
+        kb.add_button('🔍 Поиск', color=VkKeyboardColor.SECONDARY)
+    else:
+        kb.add_button('📅 Сегодня', color=VkKeyboardColor.PRIMARY)
+        kb.add_button('⏭ Завтра', color=VkKeyboardColor.PRIMARY)
+        kb.add_button('🗓 Неделя', color=VkKeyboardColor.SECONDARY)
+        kb.add_line()
+        kb.add_button('📚 Домашка', color=VkKeyboardColor.POSITIVE)
+        kb.add_button('🔍 Поиск', color=VkKeyboardColor.SECONDARY)
     kb.add_line()
     kb.add_button('⚙️ Настройки', color=VkKeyboardColor.SECONDARY)
     if is_starosta:
         kb.add_button('🛠 Староста', color=VkKeyboardColor.PRIMARY)
     return kb.get_keyboard()
+
+
+def _user_main_kb(user):
+    sess_on = is_session_mode_enabled(user.get('faculty', ''), user.get('group_name', '')) if user else False
+    return build_main_kb(user.get('is_starosta', 0) if user else 0, session_mode=sess_on)
 
 
 def build_day_nav_kb(offset):
@@ -921,7 +931,16 @@ def send_starosta_menu(vk, peer_id, user):
     kb.add_line()
     kb.add_button('📋 Активные правки', color=VkKeyboardColor.SECONDARY, payload={'act': 'st_changes'})
     kb.add_button('📝 Добавить ДЗ', color=VkKeyboardColor.POSITIVE, payload={'act': 'st_hw'})
-    send_vk_msg(vk, peer_id, f'🛠 ПАНЕЛЬ СТАРОСТЫ (VK)\n🛡 Группа: {user["managed_group"] or user["group_name"]}', keyboard=kb.get_keyboard())
+    m_grp = user['managed_group'] or user['group_name']
+    _, m_fac = find_course_and_faculty_by_group(m_grp)
+    sess_on = is_session_mode_enabled(m_fac or user['faculty'], m_grp)
+    kb.add_line()
+    kb.add_button(
+        '🎓 Режим сессии: ВКЛ' if sess_on else '🎓 Режим сессии: ВЫКЛ',
+        color=VkKeyboardColor.POSITIVE if sess_on else VkKeyboardColor.SECONDARY,
+        payload={'act': 'st_sess_mode'},
+    )
+    send_vk_msg(vk, peer_id, f'🛠 ПАНЕЛЬ СТАРОСТЫ (VK)\n🛡 Группа: {m_grp}', keyboard=kb.get_keyboard())
 
 
 def send_vk_msg(vk, peer_id, text, keyboard=None, attachment=None):
@@ -1236,7 +1255,7 @@ def handle_message(vk, user_id, peer_id, text, raw_payload=None, attachments=Non
 
     if low == 'меню':
         upsert_vk_user(user_id, state='', payload={})
-        send_vk_msg(vk, peer_id, '👇 Главное меню:', keyboard=build_main_kb(user['is_starosta']))
+        send_vk_msg(vk, peer_id, '👇 Главное меню:', keyboard=_user_main_kb(user))
         return
 
     # Онбординг (выбор факультета -> курса -> группы с пагинацией)
@@ -1292,7 +1311,7 @@ def handle_message(vk, user_id, peer_id, text, raw_payload=None, attachments=Non
                     vk,
                     peer_id,
                     f'✅ Профиль сохранён!\n🏛 {get_faculty_short(fac_code)} • {crs} курс • {matched_grp}\n\nВыбери действие в меню:',
-                    keyboard=build_main_kb(user['is_starosta']),
+                    keyboard=_user_main_kb(user),
                 )
                 return
 
@@ -1345,15 +1364,105 @@ def handle_message(vk, user_id, peer_id, text, raw_payload=None, attachments=Non
 
     if act == 'vk_sess_add' and user['is_starosta']:
         m_grp = user['managed_group'] or group_name
-        _, m_fac = find_course_and_faculty_by_group(m_grp)
-        upsert_vk_user(user_id, state='st_await_sess_exam', payload={'grp': m_grp, 'fac': m_fac or fac_code})
-        send_vk_msg(
-            vk,
-            peer_id,
-            '➕ ДОБАВЛЕНИЕ ЭКЗАМЕНА / ЗАЧЁТА\nОтправь одной строкой через | :\n'
-            'ДД.ММ.ГГГГ | Предмет | Тип | Время | Ауд., Преподаватель\n\n'
-            'Пример: 25.12.2026 | Экология | Экзамен | 09:00 | ауд. 206, Иванов И.И.\n(или «Отмена»)',
-        )
+        m_crs, m_fac = find_course_and_faculty_by_group(m_grp)
+        upsert_vk_user(user_id, state='', payload={'grp': m_grp, 'fac': m_fac or fac_code, 'crs': m_crs or course})
+        kb = VkKeyboard(inline=True)
+        kb.add_button('🎯 Экзамен', color=VkKeyboardColor.PRIMARY, payload={'act': 'vk_sess_tp', 't': 'Экзамен'})
+        kb.add_button('📝 Зачёт', color=VkKeyboardColor.PRIMARY, payload={'act': 'vk_sess_tp', 't': 'Зачёт'})
+        kb.add_line()
+        kb.add_button('📋 Диф. зачёт', color=VkKeyboardColor.SECONDARY, payload={'act': 'vk_sess_tp', 't': 'Диф. зачёт'})
+        kb.add_button('💬 Консультация', color=VkKeyboardColor.SECONDARY, payload={'act': 'vk_sess_tp', 't': 'Консультация'})
+        send_vk_msg(vk, peer_id, '➕ ДОБАВЛЕНИЕ В СЕССИЮ\nШаг 1/5: Выбери тип события:', keyboard=kb.get_keyboard())
+        return
+
+    if act == 'vk_sess_tp' and user['is_starosta']:
+        m_grp = user['managed_group'] or group_name
+        m_crs, m_fac = find_course_and_faculty_by_group(m_grp)
+        eff_f = m_fac or fac_code
+        eff_c = m_crs or course
+        subjs = get_all_group_subjects(eff_c, m_grp, faculty_code=eff_f)
+        upsert_vk_user(user_id, state='st_await_sess_exam', payload={'step': 'subject', 'grp': m_grp, 'fac': eff_f, 'type': pl.get('t', 'Экзамен'), 'subjs': subjs})
+        kb = VkKeyboard(inline=True)
+        for idx, s_nm in enumerate(subjs[:6]):
+            if idx > 0 and idx % 2 == 0:
+                kb.add_line()
+            kb.add_button(short_text(s_nm, 20), color=VkKeyboardColor.PRIMARY, payload={'act': 'vk_sess_sb', 'i': idx})
+        send_vk_msg(vk, peer_id, f'🎓 Тип: {pl.get("t", "Экзамен")}\nШаг 2/5: Выбери предмет ниже или напиши название вручную (или «Отмена»):', keyboard=(kb.get_keyboard() if subjs else None))
+        return
+
+    if act == 'vk_sess_sb' and user['is_starosta']:
+        st_cur = dict(user['payload'] or {})
+        subjs = st_cur.get('subjs') or []
+        idx = int(pl.get('i', -1))
+        if not (0 <= idx < len(subjs)):
+            return
+        st_cur['subj'] = subjs[idx]
+        st_cur['step'] = 'date'
+        upsert_vk_user(user_id, state='st_await_sess_exam', payload=st_cur)
+        today = now_local()
+        d1 = (today + timedelta(days=1)).strftime('%d.%m.%Y')
+        d2 = (today + timedelta(days=2)).strftime('%d.%m.%Y')
+        d7 = (today + timedelta(days=7)).strftime('%d.%m.%Y')
+        kb = VkKeyboard(inline=True)
+        kb.add_button(f'Завтра ({d1[:5]})', color=VkKeyboardColor.PRIMARY, payload={'act': 'vk_sess_dt', 'd': d1})
+        kb.add_button(f'Послезавтра ({d2[:5]})', color=VkKeyboardColor.PRIMARY, payload={'act': 'vk_sess_dt', 'd': d2})
+        kb.add_line()
+        kb.add_button(f'Через неделю ({d7[:5]})', color=VkKeyboardColor.SECONDARY, payload={'act': 'vk_sess_dt', 'd': d7})
+        send_vk_msg(vk, peer_id, f'📘 Предмет: {subjs[idx]}\nШаг 3/5: Выбери дату или напиши вручную (например, 25.12):', keyboard=kb.get_keyboard())
+        return
+
+    if act == 'vk_sess_dt' and user['is_starosta']:
+        st_cur = dict(user['payload'] or {})
+        st_cur['date'] = pl['d']
+        st_cur['step'] = 'time'
+        upsert_vk_user(user_id, state='st_await_sess_exam', payload=st_cur)
+        kb = VkKeyboard(inline=True)
+        kb.add_button('08:00', color=VkKeyboardColor.PRIMARY, payload={'act': 'vk_sess_tm', 'tm': '08:00'})
+        kb.add_button('09:00', color=VkKeyboardColor.PRIMARY, payload={'act': 'vk_sess_tm', 'tm': '09:00'})
+        kb.add_button('10:00', color=VkKeyboardColor.PRIMARY, payload={'act': 'vk_sess_tm', 'tm': '10:00'})
+        kb.add_line()
+        kb.add_button('14:00', color=VkKeyboardColor.PRIMARY, payload={'act': 'vk_sess_tm', 'tm': '14:00'})
+        kb.add_button('⏭ Пропустить', color=VkKeyboardColor.SECONDARY, payload={'act': 'vk_sess_tm', 'tm': ''})
+        send_vk_msg(vk, peer_id, f'📅 Дата: {pl["d"]}\nШаг 4/5: Выбери время или напиши вручную:', keyboard=kb.get_keyboard())
+        return
+
+    if act == 'vk_sess_tm' and user['is_starosta']:
+        st_cur = dict(user['payload'] or {})
+        st_cur['time'] = pl.get('tm', '')
+        st_cur['step'] = 'extra'
+        upsert_vk_user(user_id, state='st_await_sess_exam', payload=st_cur)
+        kb = VkKeyboard(inline=True)
+        kb.add_button('⏭ Пропустить и сохранить', color=VkKeyboardColor.POSITIVE, payload={'act': 'vk_sess_save'})
+        send_vk_msg(vk, peer_id, 'Шаг 5/5: Напиши аудиторию и/или преподавателя (например: ауд. 206, Иванов И.И.) или нажми «Пропустить и сохранить»:', keyboard=kb.get_keyboard())
+        return
+
+    if act == 'vk_sess_save' and user['is_starosta']:
+        st_cur = dict(user['payload'] or {})
+        upsert_vk_user(user_id, state='', payload={})
+        m_grp = st_cur.get('grp') or group_name
+        m_fac = st_cur.get('fac') or fac_code
+        ex_date = st_cur.get('date', '')
+        ex_time = st_cur.get('time', '')
+        subj = st_cur.get('subj', '')
+        ex_type = st_cur.get('type', 'Экзамен')
+        if not ex_date or not subj:
+            send_vk_msg(vk, peer_id, '⚠️ Сессия добавления устарела, попробуй заново.', keyboard=_user_main_kb(user))
+            return
+        with db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                'INSERT INTO session_exams (faculty, group_name, exam_date, exam_time, subject_name, exam_type, teacher, room, added_by, created_at) '
+                'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                (m_fac, m_grp, ex_date, ex_time, subj, ex_type, '', '', -abs(int(user_id)), now_local().strftime('%d.%m.%Y %H:%M')),
+            )
+            tg_users = [r[0] for r in cursor.execute('SELECT user_id FROM users WHERE (faculty = ? OR faculty IS NULL OR faculty = "") AND group_name = ? AND notify_updates = 1', (m_fac, m_grp)).fetchall()]
+        tg_msg = f'🎓 <b>СЕССИЯ: ДОБАВЛЕН {esc(ex_type.upper())} (из VK)</b>\n<blockquote>📚 {esc(m_grp)} • {ex_date} {esc(ex_time)}</blockquote>\n📘 <b>{esc(subj)}</b>'
+        for u_id in tg_users:
+            enqueue_message(u_id, tg_msg, parse_mode='HTML')
+        for g_cid in get_bound_group_chats(m_fac, m_grp):
+            enqueue_message(g_cid, tg_msg, parse_mode='HTML')
+        notify_vk_group_users(m_fac, m_grp, f'🎓 СЕССИЯ: ДОБАВЛЕН {ex_type.upper()}\n📚 {m_grp} • {ex_date} {ex_time}\n📘 {subj}', exclude_vk_id=user_id)
+        send_vk_msg(vk, peer_id, '✅ Запись сессии сохранена и разослана в TG и VK!', keyboard=_user_main_kb(user))
         return
 
     if act == 'vk_sess_del' and user['is_starosta']:
@@ -1406,11 +1515,21 @@ def handle_message(vk, user_id, peer_id, text, raw_payload=None, attachments=Non
         for g_cid in get_bound_group_chats(eff_f, h_grp):
             enqueue_message(g_cid, tg_del_msg, parse_mode='HTML')
         notify_vk_group_users(eff_f, h_grp, f'🗑 ДОМАШНЕЕ ЗАДАНИЕ УДАЛЕНО\n🎓 Группа: {h_grp} • Дедлайн был: {hw_date}\n📘 {hw_subj}', exclude_vk_id=user_id)
-        send_vk_msg(vk, peer_id, f'🗑 ДЗ по предмету «{hw_subj}» удалено!', keyboard=build_main_kb(user['is_starosta']))
+        send_vk_msg(vk, peer_id, f'🗑 ДЗ по предмету «{hw_subj}» удалено!', keyboard=_user_main_kb(user))
         return
 
     if act == 'st_changes' and user['is_starosta']:
         send_vk_active_changes(vk, peer_id, user)
+        return
+
+    if act == 'st_sess_mode' and user['is_starosta']:
+        m_grp = user['managed_group'] or group_name
+        _, m_fac = find_course_and_faculty_by_group(m_grp)
+        eff_f = m_fac or infer_faculty_by_group(m_grp) or fac_code
+        new_val = not is_session_mode_enabled(eff_f, m_grp)
+        import admin_replacements
+        admin_replacements.toggle_group_session_mode_and_notify(eff_f, m_grp, new_val)
+        send_starosta_menu(vk, peer_id, user)
         return
 
     if act in ('vk_rev_r', 'vk_rev_c') and user['is_starosta']:
@@ -1525,7 +1644,7 @@ def handle_message(vk, user_id, peer_id, text, raw_payload=None, attachments=Non
 
     if act == 'srch_tq':
         upsert_vk_user(user_id, state='', payload={})
-        send_vk_msg(vk, peer_id, search_teacher_plain(pl.get('q', ''), pl.get('p', 'today')), keyboard=build_main_kb(user['is_starosta']))
+        send_vk_msg(vk, peer_id, search_teacher_plain(pl.get('q', ''), pl.get('p', 'today')), keyboard=_user_main_kb(user))
         return
 
     if act == 'srch_r':
@@ -1616,7 +1735,7 @@ def handle_message(vk, user_id, peer_id, text, raw_payload=None, attachments=Non
         for g_cid in get_bound_group_chats(m_fac, m_grp):
             enqueue_message(g_cid, tg_msg, parse_mode='HTML')
         notify_vk_group_users(m_fac, m_grp, f'🚫 ОТМЕНА ПАРЫ!\n🎓 {m_grp} • {d_str}\n❌ {format_pair_prefix(t_slot)} — ОТМЕНЕНА', exclude_vk_id=user_id)
-        send_vk_msg(vk, peer_id, f'✅ Пара ({pl["p"]} пара, {d_str}) отменена! Уведомления отправлены в TG и VK.', keyboard=build_main_kb(user['is_starosta']))
+        send_vk_msg(vk, peer_id, f'✅ Пара ({pl["p"]} пара, {d_str}) отменена! Уведомления отправлены в TG и VK.', keyboard=_user_main_kb(user))
         return
 
     if act == 'st_hw_spage':
@@ -1677,7 +1796,7 @@ def handle_message(vk, user_id, peer_id, text, raw_payload=None, attachments=Non
     if st:
         if low in ('отмена', '/cancel'):
             upsert_vk_user(user_id, state='', payload={})
-            send_vk_msg(vk, peer_id, '❌ Действие отменено.', keyboard=build_main_kb(user['is_starosta']))
+            send_vk_msg(vk, peer_id, '❌ Действие отменено.', keyboard=_user_main_kb(user))
             return
 
         if st == 'awaiting_teacher':
@@ -1685,7 +1804,7 @@ def handle_message(vk, user_id, peer_id, text, raw_payload=None, attachments=Non
                 send_vk_msg(vk, peer_id, '⚠️ Введи хотя бы 2 буквы фамилии преподавателя текстом (или напиши «Отмена»):')
                 return
             upsert_vk_user(user_id, state='', payload={})
-            send_vk_msg(vk, peer_id, search_teacher_plain(raw, st_pl.get('period', 'today')), keyboard=build_main_kb(user['is_starosta']))
+            send_vk_msg(vk, peer_id, search_teacher_plain(raw, st_pl.get('period', 'today')), keyboard=_user_main_kb(user))
             return
 
         if st == 'st_await_hw_edit':
@@ -1700,7 +1819,7 @@ def handle_message(vk, user_id, peer_id, text, raw_payload=None, attachments=Non
                 cursor = conn.cursor()
                 hrow = cursor.execute('SELECT target_date, subject_name FROM homeworks WHERE id = ?', (hw_id,)).fetchone()
                 if not hrow:
-                    send_vk_msg(vk, peer_id, '⚠️ Задание уже удалено.', keyboard=build_main_kb(user['is_starosta']))
+                    send_vk_msg(vk, peer_id, '⚠️ Задание уже удалено.', keyboard=_user_main_kb(user))
                     return
                 cursor.execute('UPDATE homeworks SET hw_text = ? WHERE id = ?', (raw, hw_id))
                 tg_users = [r[0] for r in cursor.execute('SELECT user_id FROM users WHERE (faculty = ? OR faculty IS NULL OR faculty = "") AND group_name = ? AND notify_updates = 1', (h_fac, h_grp)).fetchall()]
@@ -1710,48 +1829,85 @@ def handle_message(vk, user_id, peer_id, text, raw_payload=None, attachments=Non
             for g_cid in get_bound_group_chats(h_fac, h_grp):
                 enqueue_message(g_cid, tg_msg, parse_mode='HTML')
             notify_vk_group_users(h_fac, h_grp, f'✏️ ОБНОВЛЁН ТЕКСТ ДЗ\n🎓 {h_grp} • Дедлайн: {hrow[0]}\n📘 {hrow[1]}\n📝 {raw}', exclude_vk_id=user_id)
-            send_vk_msg(vk, peer_id, '✅ Текст ДЗ обновлён! Уведомления отправлены в TG и VK.', keyboard=build_main_kb(user['is_starosta']))
+            send_vk_msg(vk, peer_id, '✅ Текст ДЗ обновлён! Уведомления отправлены в TG и VK.', keyboard=_user_main_kb(user))
             return
 
         if st == 'st_await_sess_exam' and user['is_starosta']:
-            parts = [p.strip() for p in raw.split('|')]
-            if len(parts) < 2:
-                send_vk_msg(vk, peer_id, '⚠️ Используй разделитель | . Минимум: ДД.ММ.ГГГГ | Предмет (или «Отмена»):')
+            step = st_pl.get('step', 'subject')
+            if step == 'subject':
+                if not raw:
+                    send_vk_msg(vk, peer_id, '⚠️ Введи название предмета (или «Отмена»):')
+                    return
+                st_next = dict(st_pl, subj=raw, step='date')
+                upsert_vk_user(user_id, state='st_await_sess_exam', payload=st_next)
+                today = now_local()
+                d1 = (today + timedelta(days=1)).strftime('%d.%m.%Y')
+                d2 = (today + timedelta(days=2)).strftime('%d.%m.%Y')
+                d7 = (today + timedelta(days=7)).strftime('%d.%m.%Y')
+                kb = VkKeyboard(inline=True)
+                kb.add_button(f'Завтра ({d1[:5]})', color=VkKeyboardColor.PRIMARY, payload={'act': 'vk_sess_dt', 'd': d1})
+                kb.add_button(f'Послезавтра ({d2[:5]})', color=VkKeyboardColor.PRIMARY, payload={'act': 'vk_sess_dt', 'd': d2})
+                kb.add_line()
+                kb.add_button(f'Через неделю ({d7[:5]})', color=VkKeyboardColor.SECONDARY, payload={'act': 'vk_sess_dt', 'd': d7})
+                send_vk_msg(vk, peer_id, f'📘 Предмет: {raw}\nШаг 3/5: Выбери дату или напиши вручную (например, 25.12):', keyboard=kb.get_keyboard())
                 return
-            try:
-                ex_date = datetime.strptime(parts[0], '%d.%m.%Y').strftime('%d.%m.%Y')
-            except ValueError:
-                send_vk_msg(vk, peer_id, '⚠️ Неверный формат даты. Пример: 25.12.2026 | Экология (или «Отмена»):')
+            if step == 'date':
+                import admin_replacements
+                parsed_d = admin_replacements._parse_flexible_session_date(raw)
+                if not parsed_d:
+                    send_vk_msg(vk, peer_id, '⚠️ Неверный формат даты. Напиши ДД.ММ или ДД.ММ.ГГГГ (например, 25.12):')
+                    return
+                st_next = dict(st_pl, date=parsed_d, step='time')
+                upsert_vk_user(user_id, state='st_await_sess_exam', payload=st_next)
+                kb = VkKeyboard(inline=True)
+                kb.add_button('08:00', color=VkKeyboardColor.PRIMARY, payload={'act': 'vk_sess_tm', 'tm': '08:00'})
+                kb.add_button('09:00', color=VkKeyboardColor.PRIMARY, payload={'act': 'vk_sess_tm', 'tm': '09:00'})
+                kb.add_button('10:00', color=VkKeyboardColor.PRIMARY, payload={'act': 'vk_sess_tm', 'tm': '10:00'})
+                kb.add_line()
+                kb.add_button('14:00', color=VkKeyboardColor.PRIMARY, payload={'act': 'vk_sess_tm', 'tm': '14:00'})
+                kb.add_button('⏭ Пропустить', color=VkKeyboardColor.SECONDARY, payload={'act': 'vk_sess_tm', 'tm': ''})
+                send_vk_msg(vk, peer_id, f'📅 Дата: {parsed_d}\nШаг 4/5: Выбери время или напиши вручную:', keyboard=kb.get_keyboard())
                 return
-            upsert_vk_user(user_id, state='', payload={})
-            subj = parts[1]
-            ex_type = parts[2] if len(parts) > 2 and parts[2] else 'Экзамен'
-            ex_time = parts[3] if len(parts) > 3 and parts[3] not in ('-', '—') else ''
-            extra = parts[4] if len(parts) > 4 else ''
-            room, teacher = ([x.strip() for x in extra.split(',', 1)] if ',' in extra else (extra, ''))
-            m_grp = st_pl['grp']
-            m_fac = st_pl['fac']
-            with db_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    'INSERT INTO session_exams (faculty, group_name, exam_date, exam_time, subject_name, exam_type, teacher, room, added_by, created_at) '
-                    'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-                    (m_fac, m_grp, ex_date, ex_time, subj, ex_type, teacher, room, -abs(int(user_id)), now_local().strftime('%d.%m.%Y %H:%M')),
-                )
-                tg_users = [r[0] for r in cursor.execute('SELECT user_id FROM users WHERE (faculty = ? OR faculty IS NULL OR faculty = "") AND group_name = ? AND notify_updates = 1', (m_fac, m_grp)).fetchall()]
-            tg_msg = f'🎓 <b>СЕССИЯ: ДОБАВЛЕН {esc(ex_type.upper())} (из VK)</b>\n<blockquote>📚 {esc(m_grp)} • {ex_date} {esc(ex_time)}</blockquote>\n📘 <b>{esc(subj)}</b>'
-            for u_id in tg_users:
-                enqueue_message(u_id, tg_msg, parse_mode='HTML')
-            for g_cid in get_bound_group_chats(m_fac, m_grp):
-                enqueue_message(g_cid, tg_msg, parse_mode='HTML')
-            notify_vk_group_users(m_fac, m_grp, f'🎓 СЕССИЯ: ДОБАВЛЕН {ex_type.upper()}\n📚 {m_grp} • {ex_date} {ex_time}\n📘 {subj}', exclude_vk_id=user_id)
-            send_vk_msg(vk, peer_id, '✅ Запись сессии сохранена и разослана в TG и VK!', keyboard=build_main_kb(user['is_starosta']))
-            return
+            if step == 'time':
+                t_val = '' if raw.lower() in ('-', '—', 'пропустить', 'нет') else raw.replace('.', ':')[:10]
+                st_next = dict(st_pl, time=t_val, step='extra')
+                upsert_vk_user(user_id, state='st_await_sess_exam', payload=st_next)
+                kb = VkKeyboard(inline=True)
+                kb.add_button('⏭ Пропустить и сохранить', color=VkKeyboardColor.POSITIVE, payload={'act': 'vk_sess_save'})
+                send_vk_msg(vk, peer_id, 'Шаг 5/5: Напиши аудиторию и/или преподавателя (например: ауд. 206, Иванов И.И.) или нажми «Пропустить и сохранить»:', keyboard=kb.get_keyboard())
+                return
+            if step == 'extra':
+                upsert_vk_user(user_id, state='', payload={})
+                room, teacher = '', ''
+                if raw.lower() not in ('-', '—', 'пропустить', 'нет'):
+                    room, teacher = ([x.strip() for x in raw.split(',', 1)] if ',' in raw else (raw, ''))
+                m_grp = st_pl.get('grp') or group_name
+                m_fac = st_pl.get('fac') or fac_code
+                ex_date = st_pl.get('date', '')
+                ex_time = st_pl.get('time', '')
+                subj = st_pl.get('subj', '')
+                ex_type = st_pl.get('type', 'Экзамен')
+                with db_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        'INSERT INTO session_exams (faculty, group_name, exam_date, exam_time, subject_name, exam_type, teacher, room, added_by, created_at) '
+                        'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                        (m_fac, m_grp, ex_date, ex_time, subj, ex_type, teacher, room, -abs(int(user_id)), now_local().strftime('%d.%m.%Y %H:%M')),
+                    )
+                    tg_users = [r[0] for r in cursor.execute('SELECT user_id FROM users WHERE (faculty = ? OR faculty IS NULL OR faculty = "") AND group_name = ? AND notify_updates = 1', (m_fac, m_grp)).fetchall()]
+                tg_msg = f'🎓 <b>СЕССИЯ: ДОБАВЛЕН {esc(ex_type.upper())} (из VK)</b>\n<blockquote>📚 {esc(m_grp)} • {ex_date} {esc(ex_time)}</blockquote>\n📘 <b>{esc(subj)}</b>'
+                for u_id in tg_users:
+                    enqueue_message(u_id, tg_msg, parse_mode='HTML')
+                for g_cid in get_bound_group_chats(m_fac, m_grp):
+                    enqueue_message(g_cid, tg_msg, parse_mode='HTML')
+                notify_vk_group_users(m_fac, m_grp, f'🎓 СЕССИЯ: ДОБАВЛЕН {ex_type.upper()}\n📚 {m_grp} • {ex_date} {ex_time}\n📘 {subj}', exclude_vk_id=user_id)
+                send_vk_msg(vk, peer_id, '✅ Запись сессии сохранена и разослана в TG и VK!', keyboard=_user_main_kb(user))
+                return
 
         if st == 'awaiting_slot_pick':
             upsert_vk_user(user_id, state='', payload={})
             if not raw.isdigit():
-                send_vk_msg(vk, peer_id, '⚠️ Нужно ввести номер вопроса числом.', keyboard=build_main_kb(user['is_starosta']))
+                send_vk_msg(vk, peer_id, '⚠️ Нужно ввести номер вопроса числом.', keyboard=_user_main_kb(user))
                 return
             slot_num = int(raw)
             qid = int(st_pl['qid'])
@@ -1766,7 +1922,7 @@ def handle_message(vk, user_id, peer_id, text, raw_payload=None, attachments=Non
                     send_vk_msg(vk, peer_id, '⚠️ Некорректный номер вопроса или очередь закрыта.')
                     return
                 if q_info[2] and q_info[2] != group_name:
-                    send_vk_msg(vk, peer_id, '⛔ Занимать вопросы могут только студенты этой группы!', keyboard=build_main_kb(user['is_starosta']))
+                    send_vk_msg(vk, peer_id, '⛔ Занимать вопросы могут только студенты этой группы!', keyboard=_user_main_kb(user))
                     return
                 try:
                     cursor.execute(
@@ -1800,7 +1956,7 @@ def handle_message(vk, user_id, peer_id, text, raw_payload=None, attachments=Non
                         enqueue_hw_media(adm_id, bug_photos, report_html, doc_file_id=bug_doc, doc_file_name=bug_doc_name)
                     else:
                         enqueue_message(adm_id, report_html, parse_mode='HTML')
-            send_vk_msg(vk, peer_id, '✅ Спасибо! Сообщение об ошибке отправлено администратору в Telegram.', keyboard=build_main_kb(user['is_starosta']))
+            send_vk_msg(vk, peer_id, '✅ Спасибо! Сообщение об ошибке отправлено администратору в Telegram.', keyboard=_user_main_kb(user))
             return
 
         if st == 'st_await_repl_text' and user['is_starosta']:
@@ -1830,7 +1986,7 @@ def handle_message(vk, user_id, peer_id, text, raw_payload=None, attachments=Non
             for g_cid in get_bound_group_chats(m_fac, m_grp):
                 enqueue_message(g_cid, tg_msg, parse_mode='HTML')
             notify_vk_group_users(m_fac, m_grp, f'⚡ НОВАЯ ЗАМЕНА!\n🎓 {m_grp} • {d_str}\n🔄 {format_pair_prefix(t_slot)}\n👉 {raw}', exclude_vk_id=user_id)
-            send_vk_msg(vk, peer_id, '✅ Замена сохранена! Уведомления отправлены в TG и VK.', keyboard=build_main_kb(user['is_starosta']))
+            send_vk_msg(vk, peer_id, '✅ Замена сохранена! Уведомления отправлены в TG и VK.', keyboard=_user_main_kb(user))
             return
 
         if st == 'st_await_hw_subj':
@@ -1894,12 +2050,15 @@ def handle_message(vk, user_id, peer_id, text, raw_payload=None, attachments=Non
             author_vk = user['full_name'] or f'id{user_id}'
             body_html = esc(hw_text) if hw_text else '<i>(см. вложение из VK)</i>'
             tg_msg = f'📚 <b>НОВОЕ ДЗ (из VK)</b>\n<blockquote>🎓 {esc(m_grp)} • Дедлайн: {d_str}\n👤 Добавил: {esc(author_vk)} (VK)</blockquote>\n📘 <b>{esc(subj)}</b>\n📝 {body_html}'
+            bound_tg_chats = get_bound_group_chats(fac_code, m_grp)
             for u_id in tg_users:
-                enqueue_hw_media(u_id, tg_photos, tg_msg, doc_file_id=tg_doc, doc_file_name=tg_doc_name)
-            for g_cid in get_bound_group_chats(fac_code, m_grp):
-                enqueue_hw_media(g_cid, tg_photos, tg_msg, doc_file_id=tg_doc, doc_file_name=tg_doc_name)
+                enqueue_hw_media(u_id, tg_photos, tg_msg, doc_file_id=tg_doc, doc_file_name=tg_doc_name, hw_id=hw_id)
+            for g_cid in bound_tg_chats:
+                enqueue_hw_media(g_cid, tg_photos, tg_msg, doc_file_id=tg_doc, doc_file_name=tg_doc_name, hw_id=hw_id)
+            if (tg_photos or tg_doc) and not tg_users and not bound_tg_chats:
+                core.cache_vk_media_to_tg_async(hw_id, tg_photos, doc_url=tg_doc, doc_name=tg_doc_name)
             notify_vk_group_users(fac_code, m_grp, f'📚 НОВОЕ ДЗ!\n🎓 {m_grp} • Дедлайн: {d_str}\n👤 Добавил: {author_vk}\n📘 {subj}\n📝 {hw_text or "(см. вложение)"}', exclude_vk_id=user_id)
-            send_vk_msg(vk, peer_id, '✅ ДЗ сохранено и разослано в TG и VK!', keyboard=build_main_kb(user['is_starosta']))
+            send_vk_msg(vk, peer_id, '✅ ДЗ сохранено и разослано в TG и VK!', keyboard=_user_main_kb(user))
             return
 
     # --- КНОПКИ ГЛАВНОГО МЕНЮ ---
@@ -1930,7 +2089,7 @@ def handle_message(vk, user_id, peer_id, text, raw_payload=None, attachments=Non
     elif raw == '🛠 Староста' or low == 'староста':
         send_starosta_menu(vk, peer_id, user)
     else:
-        send_vk_msg(vk, peer_id, '👇 Используй кнопки меню ниже:', keyboard=build_main_kb(user['is_starosta']))
+        send_vk_msg(vk, peer_id, '👇 Используй кнопки меню ниже:', keyboard=_user_main_kb(user))
 
 
 def run_vk_bot():

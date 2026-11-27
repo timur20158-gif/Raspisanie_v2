@@ -47,6 +47,7 @@ from core import (
     invalidate_user_cache,
     is_admin_user,
     is_extra_hw_lists_enabled,
+    is_session_mode_enabled,
     is_group_valid,
     is_user_starosta,
     now_local,
@@ -57,6 +58,7 @@ from core import (
     save_semester_meta,
     send_db_backup,
     set_extra_hw_lists_enabled,
+    set_session_mode_enabled,
     set_user_state,
     short_text,
     split_long_html_message,
@@ -70,7 +72,61 @@ from homework import (
     send_homeworks_for_date_view,
     show_hw_subject_selection,
 )
-from schedule_search import get_day_lessons_for_date
+from schedule_search import get_all_group_subjects, get_day_lessons_for_date
+
+
+def toggle_group_session_mode_and_notify(faculty_code, group_name, new_enabled):
+    """Переключает режим сессии для группы и обновляет клавиатуру меню у всех её студентов в TG и VK."""
+    eff_fac = faculty_code or infer_faculty_by_group(group_name)
+    set_session_mode_enabled(eff_fac, group_name, new_enabled)
+
+    with db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            'SELECT user_id, subscribed, is_starosta, is_hw_manager, username FROM users '
+            'WHERE (faculty = ? OR faculty IS NULL OR faculty = "") AND group_name = ? AND COALESCE(is_blocked, 0) = 0',
+            (eff_fac, group_name),
+        )
+        tg_users = cursor.fetchall()
+        cursor.execute(
+            'SELECT vk_user_id, COALESCE(is_starosta, 0) FROM vk_users '
+            'WHERE (faculty = ? OR faculty = "") AND group_name = ? AND COALESCE(is_blocked, 0) = 0',
+            (eff_fac, group_name),
+        )
+        vk_users = cursor.fetchall()
+
+    if new_enabled:
+        tg_msg = (
+            f'🎓 <b>ВКЛЮЧЁН РЕЖИМ СЕССИИ ({esc(group_name)})</b>\n'
+            f'<i>Меню обновлено: вместо обычного расписания появилась кнопка «🎓 Сессия».</i>'
+        )
+        vk_msg = (
+            f'🎓 ВКЛЮЧЁН РЕЖИМ СЕССИИ ({group_name})\n'
+            f'Меню обновлено: вместо обычного расписания появилась кнопка «🎓 Сессия».'
+        )
+    else:
+        tg_msg = (
+            f'📅 <b>РЕЖИМ СЕССИИ ВЫКЛЮЧЕН ({esc(group_name)})</b>\n'
+            f'<i>Меню возвращено к обычному расписанию пар.</i>'
+        )
+        vk_msg = (
+            f'📅 РЕЖИМ СЕССИИ ВЫКЛЮЧЕН ({group_name})\n'
+            f'Меню возвращено к обычному расписанию пар.'
+        )
+
+    for u_id, u_sub, u_st, u_hw, u_uname in tg_users:
+        is_st_flag = bool(u_st == 1 or (u_uname or '').lower() == ADMIN_USERNAME.lower())
+        kb = get_main_keyboard(bool(u_sub), is_starosta=is_st_flag, is_hw_manager=bool(u_hw), session_mode=bool(new_enabled))
+        enqueue_message(u_id, tg_msg, reply_markup=kb, parse_mode='HTML')
+
+    if vk_users and callable(core.VK_SEND_HOOK):
+        try:
+            import vk_bot
+            for vk_uid, v_st in vk_users:
+                v_kb = vk_bot.build_main_kb(is_starosta=v_st, session_mode=bool(new_enabled))
+                core.enqueue_vk_message(vk_uid, vk_msg, keyboard=v_kb)
+        except Exception as e:
+            print(f'Ошибка обновления VK-клавиатуры при смене режима сессии: {e}')
 
 
 def open_special_group_menu(chat_id, user_obj, message_id=None):
@@ -83,6 +139,8 @@ def open_special_group_menu(chat_id, user_obj, message_id=None):
 
     extra_on = is_extra_hw_lists_enabled(target_fac, target_group)
     extra_lbl = '📑 Доп. списки: ВКЛ' if extra_on else '📑 Доп. списки: ВЫКЛ'
+    sess_on = is_session_mode_enabled(target_fac, target_group)
+    sess_lbl = '🎓 Режим сессии: ВКЛ' if sess_on else '🎓 Режим сессии: ВЫКЛ'
 
     markup = InlineKeyboardMarkup(row_width=2)
     markup.row(
@@ -93,7 +151,10 @@ def open_special_group_menu(chat_id, user_obj, message_id=None):
         InlineKeyboardButton('📋 Активные правки', callback_data='spec_active_changes'),
         InlineKeyboardButton('📝 Добавить ДЗ', callback_data='spec_add_hw'),
     )
-    markup.row(InlineKeyboardButton(extra_lbl, callback_data='spec_toggle_extra_lists'))
+    markup.row(
+        InlineKeyboardButton(sess_lbl, callback_data='spec_toggle_session_mode'),
+        InlineKeyboardButton(extra_lbl, callback_data='spec_toggle_extra_lists'),
+    )
     if is_admin_user(user_obj):
         markup.row(InlineKeyboardButton('🔙 Назад', callback_data='spec_back'))
 
@@ -854,7 +915,7 @@ def cmd_add_starosta(message):
             f'🌟 <b>Тебе выдана роль Старосты!</b>\n'
             f'🛡 <b>Закреплённая группа:</b> {esc(assigned_group)}\n\n'
             f'В твоём нижнем меню появилась кнопка <b>«🛠 Спецвозможности»</b> для управления заменами, отменами и домашними заданиями группы.',
-            reply_markup=get_main_keyboard(sub_state, is_starosta=True),
+            reply_markup=get_main_keyboard(sub_state, is_starosta=True, session_mode=is_session_mode_enabled(row[4] if row else None, assigned_group)),
             parse_mode='HTML',
         )
     except Exception:
@@ -2217,6 +2278,17 @@ def handle_admin_and_replacements_callbacks(call):
         open_special_group_menu(chat_id, call.from_user, msg_id)
         return
 
+    if data == 'spec_toggle_session_mode':
+        if not is_user_starosta(call.from_user):
+            return
+        _, target_grp, target_fac = get_managed_context(call.from_user)
+        if not target_grp:
+            return
+        new_val = not is_session_mode_enabled(target_fac, target_grp)
+        toggle_group_session_mode_and_notify(target_fac, target_grp, new_val)
+        open_special_group_menu(chat_id, call.from_user, msg_id)
+        return
+
     if data == 'spec_stats':
         send_stats_panel(chat_id, call.from_user, tab='overview', message_id=msg_id)
         return
@@ -2766,87 +2838,204 @@ def open_session_menu(message):
     bot.send_message(message.chat.id, text, reply_markup=markup, parse_mode='HTML')
 
 
-def process_session_exam_input(message, payload):
-    clear_user_state(message.chat.id)
-    if not message.text or message.text.strip().lower() in ['отмена', '/cancel', '/start']:
-        bot.send_message(message.chat.id, '❌ Добавление экзамена отменено.')
-        return
-    group_name = (payload or {}).get('group_name', '')
-    fac_code = (payload or {}).get('faculty', '') or infer_faculty_by_group(group_name)
-    parts = [p.strip() for p in message.text.strip().split('|')]
-    if len(parts) < 2:
-        set_user_state(message.chat.id, 'awaiting_session_exam', payload)
-        bot.send_message(
-            message.chat.id,
-            '⚠️ Используй разделитель <code>|</code>. Минимум: <code>ДД.ММ.ГГГГ | Предмет</code>\n'
-            'Пример: <code>25.12.2026 | Экология | Экзамен | 09:00 | ауд. 206, Иванов И.И.</code>\n'
-            '<i>Для отмены напиши «Отмена».</i>',
-            parse_mode='HTML',
-        )
-        return
-
+def _parse_flexible_session_date(raw_text):
+    """Принимает ДД.ММ.ГГГГ или ДД.ММ (год подставляется автоматически)."""
+    s = str(raw_text or '').strip().replace('/', '.').replace('-', '.')
+    now_d = now_local().date()
+    for fmt in ('%d.%m.%Y', '%d.%m.%y'):
+        try:
+            return datetime.strptime(s, fmt).strftime('%d.%m.%Y')
+        except ValueError:
+            pass
     try:
-        dt_obj = datetime.strptime(parts[0], '%d.%m.%Y')
-        ex_date = dt_obj.strftime('%d.%m.%Y')
+        dt = datetime.strptime(s, '%d.%m').replace(year=now_d.year).date()
+        if dt < now_d - timedelta(days=30):
+            dt = dt.replace(year=now_d.year + 1)
+        return dt.strftime('%d.%m.%Y')
     except ValueError:
-        set_user_state(message.chat.id, 'awaiting_session_exam', payload)
-        bot.send_message(
-            message.chat.id,
-            '⚠️ Неверный формат даты. Укажи дату первой в формате <code>ДД.ММ.ГГГГ</code> (например, <code>25.12.2026 | Экология</code>):',
-            parse_mode='HTML',
-        )
-        return
+        return None
 
-    subj = parts[1]
-    ex_type = parts[2] if len(parts) > 2 and parts[2] else 'Экзамен'
-    ex_time = parts[3] if len(parts) > 3 and parts[3] not in ('-', '—') else ''
-    extra = parts[4] if len(parts) > 4 else ''
-    room, teacher = '', ''
-    if extra:
-        if ',' in extra:
-            room, teacher = [x.strip() for x in extra.split(',', 1)]
-        else:
-            room = extra
 
+def _save_session_exam_and_notify(chat_id, author_id, fac_code, group_name, ex_date, ex_time, subj, ex_type, room='', teacher=''):
+    eff_fac = fac_code or infer_faculty_by_group(group_name)
     with db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
             'INSERT INTO session_exams (faculty, group_name, exam_date, exam_time, subject_name, exam_type, teacher, room, added_by, created_at) '
             'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            (fac_code, group_name, ex_date, ex_time, subj, ex_type, teacher, room, message.from_user.id, now_local().strftime('%d.%m.%Y %H:%M')),
+            (eff_fac, group_name, ex_date, ex_time, subj, ex_type, teacher, room, author_id, now_local().strftime('%d.%m.%Y %H:%M')),
         )
         cursor.execute(
             'SELECT user_id FROM users WHERE (faculty = ? OR faculty IS NULL OR faculty = "") AND group_name = ? AND notify_updates = 1',
-            (fac_code, group_name),
+            (eff_fac, group_name),
         )
         tg_users = [r[0] for r in cursor.fetchall()]
 
+    meta_parts = []
+    if room:
+        meta_parts.append(f'📍 {esc(room)}')
+    if teacher:
+        meta_parts.append(f'👤 {esc(teacher)}')
+    meta_line = f'\n{" · ".join(meta_parts)}' if meta_parts else ''
+
     bot.send_message(
-        message.chat.id,
-        f'✅ <b>Запись сессии добавлена!</b>\n📅 {ex_date} {esc(ex_time)}\n📘 {esc(subj)} ({esc(ex_type)})',
+        chat_id,
+        f'✅ <b>Запись сессии добавлена!</b>\n\n'
+        f'📅 <b>{ex_date}</b>' + (f' • <code>{esc(ex_time)}</code>' if ex_time else '') + f'\n'
+        f'📘 <b>{esc(subj)}</b> <i>({esc(ex_type)})</i>{meta_line}',
         parse_mode='HTML',
     )
     notify_html = (
-        f'🎓 <b>ДОБАВЛЕН ЭКЗАМЕН / ЗАЧЁТ В СЕССИЮ</b>\n'
+        f'🎓 <b>ДОБАВЛЕНО В СЕССИЮ: {esc(ex_type.upper())}</b>\n'
         f'<blockquote>📚 <b>Группа:</b> {esc(group_name)}\n'
-        f'📅 <b>Дата:</b> {ex_date} {esc(ex_time)}</blockquote>\n\n'
-        f'📘 <b>{esc(subj)}</b> <i>({esc(ex_type)})</i>'
-        + (f'\n📍 {esc(room)}' if room else '')
-        + (f' · 👤 {esc(teacher)}' if teacher else '')
+        f'📅 <b>Дата:</b> {ex_date}' + (f' • {esc(ex_time)}' if ex_time else '') + f'</blockquote>\n\n'
+        f'📘 <b>{esc(subj)}</b> <i>({esc(ex_type)})</i>{meta_line}'
     )
     for u_id in tg_users:
-        if u_id != message.from_user.id:
+        if u_id != author_id:
             enqueue_message(u_id, notify_html, parse_mode='HTML')
-    for g_cid in get_bound_group_chats(fac_code, group_name):
+    for g_cid in get_bound_group_chats(eff_fac, group_name):
         enqueue_message(g_cid, notify_html, parse_mode='HTML')
     core.notify_vk_group(
-        fac_code,
+        eff_fac,
         group_name,
-        f'🎓 СЕССИЯ: ДОБАВЛЕН {ex_type.upper()}\n📚 {group_name} • {ex_date} {ex_time}\n📘 {subj}' + (f' ({room})' if room else ''),
+        f'🎓 СЕССИЯ: ДОБАВЛЕН {ex_type.upper()}\n📚 {group_name} • {ex_date}' + (f' {ex_time}' if ex_time else '') + f'\n📘 {subj}' + (f' ({room})' if room else ''),
     )
 
 
-@bot.callback_query_handler(func=lambda call: call.data in ('sess_add', 'sess_refresh') or call.data.startswith('sess_del_'))
+def _ask_session_date_step(chat_id, user_id, state_pl, msg_id=None):
+    set_user_state(user_id, 'awaiting_session_exam', dict(state_pl, step='date'))
+    today = now_local()
+    d1 = (today + timedelta(days=1)).strftime('%d.%m.%Y')
+    d2 = (today + timedelta(days=2)).strftime('%d.%m.%Y')
+    d3 = (today + timedelta(days=3)).strftime('%d.%m.%Y')
+    d7 = (today + timedelta(days=7)).strftime('%d.%m.%Y')
+    markup = InlineKeyboardMarkup(row_width=2)
+    markup.row(
+        InlineKeyboardButton(f'⏭ Завтра ({d1[:5]})', callback_data=f'sess_date_{d1}'),
+        InlineKeyboardButton(f'⏩ Послезавтра ({d2[:5]})', callback_data=f'sess_date_{d2}'),
+    )
+    markup.row(
+        InlineKeyboardButton(f'📅 Через 3 дня ({d3[:5]})', callback_data=f'sess_date_{d3}'),
+        InlineKeyboardButton(f'🗓 Через неделю ({d7[:5]})', callback_data=f'sess_date_{d7}'),
+    )
+    markup.row(InlineKeyboardButton('❌ Отмена', callback_data='cancel_action'))
+    txt = (
+        f'🎓 <b>{esc(state_pl.get("exam_type", "Экзамен"))}</b> — <b>{esc(state_pl.get("subject", ""))}</b>\n\n'
+        f'<b>Шаг 3 из 5.</b> Выбери дату кнопкой или напиши её в чат (например, <code>25.12</code> или <code>25.12.2026</code>):'
+    )
+    if msg_id:
+        safe_edit_message_text(txt, chat_id, msg_id, reply_markup=markup, parse_mode='HTML')
+    else:
+        bot.send_message(chat_id, txt, reply_markup=markup, parse_mode='HTML')
+
+
+def _ask_session_time_step(chat_id, user_id, state_pl, msg_id=None):
+    set_user_state(user_id, 'awaiting_session_exam', dict(state_pl, step='time'))
+    markup = InlineKeyboardMarkup(row_width=2)
+    markup.row(
+        InlineKeyboardButton('🕗 08:00', callback_data='sess_time_08:00'),
+        InlineKeyboardButton('🕘 09:00', callback_data='sess_time_09:00'),
+    )
+    markup.row(
+        InlineKeyboardButton('🕙 10:00', callback_data='sess_time_10:00'),
+        InlineKeyboardButton('🕑 14:00', callback_data='sess_time_14:00'),
+    )
+    markup.row(
+        InlineKeyboardButton('⏭ Пропустить', callback_data='sess_time_skip'),
+        InlineKeyboardButton('❌ Отмена', callback_data='cancel_action'),
+    )
+    txt = (
+        f'📅 <b>Дата:</b> {esc(state_pl.get("exam_date", ""))} • <b>{esc(state_pl.get("subject", ""))}</b>\n\n'
+        f'<b>Шаг 4 из 5.</b> Выбери время начала или напиши его вручную (например, <code>11:30</code>):'
+    )
+    if msg_id:
+        safe_edit_message_text(txt, chat_id, msg_id, reply_markup=markup, parse_mode='HTML')
+    else:
+        bot.send_message(chat_id, txt, reply_markup=markup, parse_mode='HTML')
+
+
+def _ask_session_extra_step(chat_id, user_id, state_pl, msg_id=None):
+    set_user_state(user_id, 'awaiting_session_exam', dict(state_pl, step='extra'))
+    markup = InlineKeyboardMarkup(row_width=2)
+    markup.row(
+        InlineKeyboardButton('⏭ Пропустить и сохранить', callback_data='sess_extra_skip'),
+        InlineKeyboardButton('❌ Отмена', callback_data='cancel_action'),
+    )
+    t_str = f' • {esc(state_pl.get("exam_time", ""))}' if state_pl.get('exam_time') else ''
+    txt = (
+        f'📅 <b>{esc(state_pl.get("exam_date", ""))}{t_str}</b> • <b>{esc(state_pl.get("subject", ""))}</b>\n\n'
+        f'<b>Шаг 5 из 5.</b> Напиши аудиторию и/или преподавателя (например: <code>ауд. 206, Иванов И.И.</code>) '
+        f'или нажми <b>«Пропустить и сохранить»</b>:'
+    )
+    if msg_id:
+        safe_edit_message_text(txt, chat_id, msg_id, reply_markup=markup, parse_mode='HTML')
+    else:
+        bot.send_message(chat_id, txt, reply_markup=markup, parse_mode='HTML')
+
+
+def process_session_exam_input(message, payload):
+    st = dict(payload or {})
+    step = st.get('step', 'subject')
+    if not message.text or message.text.strip().lower() in ['отмена', '/cancel', '/start']:
+        clear_user_state(message.chat.id)
+        bot.send_message(message.chat.id, '❌ Добавление экзамена отменено.')
+        return
+
+    raw = message.text.strip()
+    if step == 'subject':
+        st['subject'] = raw
+        _ask_session_date_step(message.chat.id, message.from_user.id, st)
+        return
+
+    if step == 'date':
+        parsed_d = _parse_flexible_session_date(raw)
+        if not parsed_d:
+            bot.send_message(
+                message.chat.id,
+                '⚠️ Не понял дату. Напиши в формате <code>ДД.ММ</code> или <code>ДД.ММ.ГГГГ</code> (например, <code>25.12</code>):',
+                parse_mode='HTML',
+            )
+            return
+        st['exam_date'] = parsed_d
+        _ask_session_time_step(message.chat.id, message.from_user.id, st)
+        return
+
+    if step == 'time':
+        if raw.lower() in ('-', '—', 'пропустить', 'нет'):
+            st['exam_time'] = ''
+        else:
+            st['exam_time'] = raw.replace('.', ':')[:10]
+        _ask_session_extra_step(message.chat.id, message.from_user.id, st)
+        return
+
+    if step == 'extra':
+        clear_user_state(message.chat.id)
+        room, teacher = '', ''
+        if raw.lower() not in ('-', '—', 'пропустить', 'нет'):
+            if ',' in raw:
+                room, teacher = [x.strip() for x in raw.split(',', 1)]
+            else:
+                room = raw
+        _save_session_exam_and_notify(
+            message.chat.id,
+            message.from_user.id,
+            st.get('faculty', ''),
+            st.get('group_name', ''),
+            st.get('exam_date', ''),
+            st.get('exam_time', ''),
+            st.get('subject', ''),
+            st.get('exam_type', 'Экзамен'),
+            room=room,
+            teacher=teacher,
+        )
+        return
+
+
+@bot.callback_query_handler(
+    func=lambda call: call.data in ('sess_add', 'sess_refresh', 'sess_time_skip', 'sess_extra_skip')
+    or call.data.startswith(('sess_del_', 'sess_type_', 'sess_subj_', 'sess_date_', 'sess_time_'))
+)
 def handle_session_callbacks(call):
     sync_username(call.from_user)
     user_id = call.from_user.id
@@ -2870,27 +3059,112 @@ def handle_session_callbacks(call):
         safe_edit_message_text(text, chat_id, msg_id, reply_markup=markup, parse_mode='HTML')
         return
 
+    if not can_edit:
+        return
+
     if data == 'sess_add':
-        if not can_edit:
-            return
-        _, m_grp, m_fac = get_managed_context(call.from_user)
-        set_user_state(user_id, 'awaiting_session_exam', {'group_name': m_grp or user[1], 'faculty': m_fac or user[7]})
+        m_crs, m_grp, m_fac = get_managed_context(call.from_user)
+        set_user_state(user_id, '', {
+            'group_name': m_grp or user[1],
+            'faculty': m_fac or user[7],
+            'course': m_crs or user[0],
+        })
+        markup = InlineKeyboardMarkup(row_width=2)
+        markup.row(
+            InlineKeyboardButton('🎯 Экзамен', callback_data='sess_type_Экзамен'),
+            InlineKeyboardButton('📝 Зачёт', callback_data='sess_type_Зачёт'),
+        )
+        markup.row(
+            InlineKeyboardButton('📋 Диф. зачёт', callback_data='sess_type_Диф. зачёт'),
+            InlineKeyboardButton('💬 Консультация', callback_data='sess_type_Консультация'),
+        )
+        markup.row(InlineKeyboardButton('❌ Отмена', callback_data='cancel_action'))
         safe_edit_message_text(
-            '➕ <b>ДОБАВЛЕНИЕ ЭКЗАМЕНА / ЗАЧЁТА</b>\n\n'
-            'Отправь данные одной строкой через <code>|</code>:\n'
-            '<code>ДД.ММ.ГГГГ | Предмет | Тип | Время | Ауд., Преподаватель</code>\n\n'
-            '<i>Пример:</i>\n'
-            '<code>25.12.2026 | Экология | Экзамен | 09:00 | ауд. 206, Иванов И.И.</code>\n'
-            '<i>(обязательны только дата и предмет; для отмены напиши «Отмена»)</i>',
+            '➕ <b>ДОБАВЛЕНИЕ В СЕССИЮ</b>\n\n'
+            '<b>Шаг 1 из 5.</b> Выбери тип события:',
             chat_id,
             msg_id,
+            reply_markup=markup,
             parse_mode='HTML',
         )
         return
 
-    if data.startswith('sess_del_'):
-        if not can_edit:
+    if data.startswith('sess_type_'):
+        ex_type = data.replace('sess_type_', '')
+        _, st = get_user_state(user_id)
+        st = dict(st or {})
+        m_grp = st.get('group_name') or user[1]
+        m_fac = st.get('faculty') or user[7]
+        m_crs = st.get('course') or user[0]
+        subjects = get_all_group_subjects(m_crs, m_grp, faculty_code=m_fac)
+        st.update({'exam_type': ex_type, 'subjects': subjects, 'step': 'subject', 'group_name': m_grp, 'faculty': m_fac, 'course': m_crs})
+        set_user_state(user_id, 'awaiting_session_exam', st)
+        markup = InlineKeyboardMarkup(row_width=1)
+        for idx, subj in enumerate(subjects[:12]):
+            markup.add(InlineKeyboardButton(f'📘 {short_text(subj, 36)}', callback_data=f'sess_subj_{idx}'))
+        markup.add(InlineKeyboardButton('❌ Отмена', callback_data='cancel_action'))
+        safe_edit_message_text(
+            f'🎓 <b>Тип:</b> {esc(ex_type)}\n\n'
+            f'<b>Шаг 2 из 5.</b> Выбери предмет из списка ниже <b>или напиши его название вручную</b>:',
+            chat_id,
+            msg_id,
+            reply_markup=markup,
+            parse_mode='HTML',
+        )
+        return
+
+    if data.startswith('sess_subj_'):
+        idx = int(data.replace('sess_subj_', ''))
+        _, st = get_user_state(user_id)
+        subjects = (st or {}).get('subjects') or []
+        if not (0 <= idx < len(subjects)):
             return
+        st = dict(st)
+        st['subject'] = subjects[idx]
+        _ask_session_date_step(chat_id, user_id, st, msg_id=msg_id)
+        return
+
+    if data.startswith('sess_date_'):
+        ex_date = data.replace('sess_date_', '')
+        _, st = get_user_state(user_id)
+        if not st:
+            return
+        st = dict(st)
+        st['exam_date'] = ex_date
+        _ask_session_time_step(chat_id, user_id, st, msg_id=msg_id)
+        return
+
+    if data == 'sess_time_skip' or data.startswith('sess_time_'):
+        _, st = get_user_state(user_id)
+        if not st:
+            return
+        st = dict(st)
+        st['exam_time'] = '' if data == 'sess_time_skip' else data.replace('sess_time_', '')
+        _ask_session_extra_step(chat_id, user_id, st, msg_id=msg_id)
+        return
+
+    if data == 'sess_extra_skip':
+        _, st = get_user_state(user_id)
+        clear_user_state(user_id)
+        if not st:
+            return
+        try:
+            bot.delete_message(chat_id, msg_id)
+        except Exception:
+            pass
+        _save_session_exam_and_notify(
+            chat_id,
+            user_id,
+            st.get('faculty', user[7]),
+            st.get('group_name', user[1]),
+            st.get('exam_date', ''),
+            st.get('exam_time', ''),
+            st.get('subject', ''),
+            st.get('exam_type', 'Экзамен'),
+        )
+        return
+
+    if data.startswith('sess_del_'):
         ex_id = int(data.replace('sess_del_', ''))
         with db_connection() as conn:
             conn.execute('DELETE FROM session_exams WHERE id = ? AND group_name = ?', (ex_id, user[1]))

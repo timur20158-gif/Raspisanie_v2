@@ -1367,6 +1367,7 @@ def send_hw_items(chat_id, user_obj, items, title, target_group_name=None):
                 reply_markup=markup,
                 doc_file_id=hw_doc_id,
                 doc_file_name=hw_doc_name,
+                hw_id=hw_id,
             )
         except Exception:
             bot.send_message(
@@ -1415,6 +1416,7 @@ def send_single_hw_card(chat_id, user_obj, hw_row, target_group_name=None):
             reply_markup=markup,
             doc_file_id=hw_doc_id,
             doc_file_name=hw_doc_name,
+            hw_id=hw_id,
         )
     except Exception:
         bot.send_message(

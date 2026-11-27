@@ -185,10 +185,10 @@ VK_NOTIFY_GROUP_HOOK = None
 VK_QUEUE_SIZE_HOOK = None
 
 
-def enqueue_vk_message(vk_user_id, text, attachment=None):
+def enqueue_vk_message(vk_user_id, text, attachment=None, keyboard=None):
     if callable(VK_SEND_HOOK):
         try:
-            VK_SEND_HOOK(int(vk_user_id), text, attachment=attachment)
+            VK_SEND_HOOK(int(vk_user_id), text, attachment=attachment, keyboard=keyboard)
         except Exception as e:
             print(f'Ошибка отправки в VK ({vk_user_id}): {e}')
 
@@ -230,6 +230,7 @@ def _mailing_worker():
                     reply_markup=task.get('reply_markup'),
                     doc_file_id=task.get('doc_file_id', ''),
                     doc_file_name=task.get('doc_file_name', ''),
+                    hw_id=task.get('hw_id'),
                 )
             else:
                 status, retry_after = _direct_send_message(
@@ -269,7 +270,7 @@ def enqueue_message(user_id, text, reply_markup=None, parse_mode='HTML'):
         })
 
 
-def enqueue_hw_media(user_id, photo_ids, caption_html, reply_markup=None, doc_file_id='', doc_file_name=''):
+def enqueue_hw_media(user_id, photo_ids, caption_html, reply_markup=None, doc_file_id='', doc_file_name='', hw_id=None):
     MAILING_QUEUE.put({
         'kind': 'media',
         'user_id': user_id,
@@ -278,6 +279,7 @@ def enqueue_hw_media(user_id, photo_ids, caption_html, reply_markup=None, doc_fi
         'reply_markup': reply_markup,
         'doc_file_id': doc_file_id,
         'doc_file_name': doc_file_name,
+        'hw_id': hw_id,
         '_retries': 0,
     })
 
@@ -824,8 +826,13 @@ def init_db():
             'faculty TEXT DEFAULT "", '
             'group_name TEXT, '
             'extra_hw_lists INTEGER DEFAULT 0, '
+            'session_mode INTEGER DEFAULT 0, '
             'PRIMARY KEY (faculty, group_name))'
         )
+        cursor.execute('PRAGMA table_info(group_settings)')
+        gs_cols = [c[1] for c in cursor.fetchall()]
+        if 'session_mode' not in gs_cols:
+            cursor.execute('ALTER TABLE group_settings ADD COLUMN session_mode INTEGER DEFAULT 0')
 
         cursor.execute(
             'CREATE TABLE IF NOT EXISTS session_exams ('
@@ -1161,17 +1168,42 @@ def send_long_html_message(chat_id, text, reply_markup=None, parse_mode='HTML'):
 
 
 _TG_DOC_URL_CACHE = {}
+_TG_URL_TO_FILE_ID = {}
 _TG_DOC_URL_CACHE_LOCK = threading.Lock()
 
 
+def _save_hw_permanent_tg_ids(hw_id, new_photo_ids=None, new_doc_id=None):
+    if not hw_id:
+        return
+    try:
+        with db_connection() as conn:
+            cursor = conn.cursor()
+            if new_photo_ids is not None:
+                cursor.execute(
+                    'UPDATE homeworks SET photo_file_id = ? WHERE id = ?',
+                    (serialize_photo_ids(new_photo_ids), int(hw_id)),
+                )
+            if new_doc_id:
+                cursor.execute(
+                    'UPDATE homeworks SET doc_file_id = ? WHERE id = ?',
+                    (str(new_doc_id), int(hw_id)),
+                )
+    except Exception as e:
+        print(f'Ошибка сохранения постоянных TG file_id для ДЗ {hw_id}: {e}')
+
+
 def _prepare_tg_doc_payload(doc_file_id, doc_file_name=''):
-    """Если doc_file_id — это URL (например, документ из VK), скачивает его один раз
-    и кэширует байты в памяти на 15 минут, чтобы при рассылке на 25+ человек не качать повторно."""
+    """Если doc_file_id — это URL (например, документ из VK), сначала проверяет кэш
+    постоянных Telegram file_id, а если его нет — скачивает байты в BytesIO."""
     if not doc_file_id:
         return doc_file_id
     val = str(doc_file_id).strip()
     if not val.startswith(('http://', 'https://')):
         return val
+    with _TG_DOC_URL_CACHE_LOCK:
+        cached_fid = _TG_URL_TO_FILE_ID.get(val)
+    if cached_fid:
+        return cached_fid
     now_ts = time.time()
     with _TG_DOC_URL_CACHE_LOCK:
         # Очистка устаревших записей (> 15 мин)
@@ -1199,10 +1231,126 @@ def _prepare_tg_doc_payload(doc_file_id, doc_file_name=''):
         return val
 
 
-def send_hw_media(chat_id, photo_ids, caption_html, reply_markup=None, doc_file_id='', doc_file_name=''):
+def _prepare_tg_photo_payload(pid, idx=0):
+    """Если photo_id — это URL (например, фото из VK), скачивает его байтами в BytesIO
+    с кэшированием в памяти, чтобы Telegram не падал на CDN/редиректах VK."""
+    if not pid:
+        return pid
+    val = str(pid).strip()
+    if not val.startswith(('http://', 'https://')):
+        return val
+    return _prepare_tg_doc_payload(val, f'photo_{idx + 1}.jpg')
+
+
+def _remember_sent_media(hw_id, raw_photo_ids, raw_doc_id, sent_photo_msgs=None, sent_doc_msg=None):
+    updated_photos = None
+    if raw_photo_ids and sent_photo_msgs and any(str(p).startswith(('http://', 'https://')) for p in raw_photo_ids):
+        new_pids = []
+        changed = False
+        for idx, orig in enumerate(raw_photo_ids):
+            fid = orig
+            if idx < len(sent_photo_msgs) and getattr(sent_photo_msgs[idx], 'photo', None):
+                fid = sent_photo_msgs[idx].photo[-1].file_id
+                if str(orig).startswith(('http://', 'https://')):
+                    with _TG_DOC_URL_CACHE_LOCK:
+                        _TG_URL_TO_FILE_ID[str(orig).strip()] = fid
+                    changed = True
+            new_pids.append(fid)
+        if changed:
+            updated_photos = new_pids
+
+    updated_doc = None
+    if raw_doc_id and str(raw_doc_id).startswith(('http://', 'https://')) and sent_doc_msg and getattr(sent_doc_msg, 'document', None):
+        updated_doc = sent_doc_msg.document.file_id
+        with _TG_DOC_URL_CACHE_LOCK:
+            _TG_URL_TO_FILE_ID[str(raw_doc_id).strip()] = updated_doc
+
+    if hw_id and (updated_photos is not None or updated_doc):
+        _save_hw_permanent_tg_ids(hw_id, new_photo_ids=updated_photos, new_doc_id=updated_doc)
+
+
+def cache_vk_media_to_tg_async(hw_id, photo_urls, doc_url='', doc_name=''):
+    """В фоне тихо загружает фото/документ из VK в Telegram, чтобы сразу сохранить
+    постоянный file_id в БД homeworks (защита от протухания ссылок VK CDN)."""
+    if not hw_id or (not photo_urls and not doc_url):
+        return
+
+    def _worker():
+        cache_chat_env = (os.getenv('TG_MEDIA_CACHE_CHAT_ID') or '').strip()
+        target_chat_id = None
+        if cache_chat_env and cache_chat_env.lstrip('-').isdigit():
+            target_chat_id = int(cache_chat_env)
+        else:
+            try:
+                with db_connection() as conn:
+                    row = conn.execute(
+                        'SELECT user_id FROM users WHERE LOWER(username) = ? LIMIT 1',
+                        (ADMIN_USERNAME.lower(),),
+                    ).fetchone()
+                if row:
+                    target_chat_id = int(row[0])
+            except Exception:
+                pass
+        if not target_chat_id:
+            return
+
+        new_photo_fids = []
+        for idx, p_url in enumerate(photo_urls or []):
+            if not str(p_url).startswith(('http://', 'https://')):
+                new_photo_fids.append(p_url)
+                continue
+            try:
+                payload = _prepare_tg_photo_payload(p_url, idx)
+                m = bot.send_photo(target_chat_id, payload, disable_notification=True)
+                if getattr(m, 'photo', None):
+                    fid = m.photo[-1].file_id
+                    new_photo_fids.append(fid)
+                    with _TG_DOC_URL_CACHE_LOCK:
+                        _TG_URL_TO_FILE_ID[str(p_url).strip()] = fid
+                else:
+                    new_photo_fids.append(p_url)
+                try:
+                    bot.delete_message(target_chat_id, m.message_id)
+                except Exception:
+                    pass
+            except Exception as e:
+                print(f'Ошибка кэширования VK-фото в TG (hw {hw_id}): {e}')
+                new_photo_fids.append(p_url)
+
+        new_doc_fid = None
+        if doc_url and str(doc_url).startswith(('http://', 'https://')):
+            try:
+                payload = _prepare_tg_doc_payload(doc_url, doc_name)
+                m = bot.send_document(target_chat_id, payload, disable_notification=True)
+                if getattr(m, 'document', None):
+                    new_doc_fid = m.document.file_id
+                    with _TG_DOC_URL_CACHE_LOCK:
+                        _TG_URL_TO_FILE_ID[str(doc_url).strip()] = new_doc_fid
+                try:
+                    bot.delete_message(target_chat_id, m.message_id)
+                except Exception:
+                    pass
+            except Exception as e:
+                print(f'Ошибка кэширования VK-документа в TG (hw {hw_id}): {e}')
+
+        if (photo_urls and new_photo_fids != list(photo_urls)) or new_doc_fid:
+            _save_hw_permanent_tg_ids(
+                hw_id,
+                new_photo_ids=(new_photo_fids if photo_urls else None),
+                new_doc_id=new_doc_fid,
+            )
+
+    threading.Thread(target=_worker, name=f'VKMediaCache_{hw_id}', daemon=True).start()
+
+
+def send_hw_media(chat_id, photo_ids, caption_html, reply_markup=None, doc_file_id='', doc_file_name='', hw_id=None):
+    raw_photo_ids = list(photo_ids or [])
+    raw_doc_id = doc_file_id
     has_doc = bool(doc_file_id)
     if has_doc:
         doc_file_id = _prepare_tg_doc_payload(doc_file_id, doc_file_name)
+    if photo_ids:
+        photo_ids = [_prepare_tg_photo_payload(p, i) for i, p in enumerate(photo_ids)]
     if not photo_ids and not has_doc:
         send_long_html_message(chat_id, caption_html, reply_markup=reply_markup, parse_mode='HTML')
         return
@@ -1211,7 +1359,7 @@ def send_hw_media(chat_id, photo_ids, caption_html, reply_markup=None, doc_file_
 
     if has_doc and not photo_ids:
         if caption_fits:
-            bot.send_document(
+            d_msg = bot.send_document(
                 chat_id,
                 doc_file_id,
                 caption=caption_html,
@@ -1219,18 +1367,19 @@ def send_hw_media(chat_id, photo_ids, caption_html, reply_markup=None, doc_file_
                 parse_mode='HTML',
             )
         else:
-            bot.send_document(
+            d_msg = bot.send_document(
                 chat_id,
                 doc_file_id,
                 caption=f'📎 <b>Прикреплённый файл:</b> {esc(doc_file_name or "Документ")}',
                 parse_mode='HTML',
             )
             send_long_html_message(chat_id, caption_html, reply_markup=reply_markup, parse_mode='HTML')
+        _remember_sent_media(hw_id, raw_photo_ids, raw_doc_id, sent_doc_msg=d_msg)
         return
 
     if len(photo_ids) == 1 and not has_doc:
         if caption_fits:
-            bot.send_photo(
+            p_msg = bot.send_photo(
                 chat_id,
                 photo_ids[0],
                 caption=caption_html,
@@ -1238,19 +1387,20 @@ def send_hw_media(chat_id, photo_ids, caption_html, reply_markup=None, doc_file_
                 parse_mode='HTML',
             )
         else:
-            bot.send_photo(chat_id, photo_ids[0])
+            p_msg = bot.send_photo(chat_id, photo_ids[0])
             send_long_html_message(chat_id, caption_html, reply_markup=reply_markup, parse_mode='HTML')
+        _remember_sent_media(hw_id, raw_photo_ids, raw_doc_id, sent_photo_msgs=[p_msg])
         return
 
     if len(photo_ids) == 1 and has_doc:
         if caption_fits:
-            bot.send_photo(
+            p_msg = bot.send_photo(
                 chat_id,
                 photo_ids[0],
                 caption=caption_html,
                 parse_mode='HTML',
             )
-            bot.send_document(
+            d_msg = bot.send_document(
                 chat_id,
                 doc_file_id,
                 caption=f'📎 <b>Прикреплённый файл:</b> {esc(doc_file_name or "Документ")}',
@@ -1258,14 +1408,15 @@ def send_hw_media(chat_id, photo_ids, caption_html, reply_markup=None, doc_file_
                 parse_mode='HTML',
             )
         else:
-            bot.send_photo(chat_id, photo_ids[0])
-            bot.send_document(
+            p_msg = bot.send_photo(chat_id, photo_ids[0])
+            d_msg = bot.send_document(
                 chat_id,
                 doc_file_id,
                 caption=f'📎 <b>Прикреплённый файл:</b> {esc(doc_file_name or "Документ")}',
                 parse_mode='HTML',
             )
             send_long_html_message(chat_id, caption_html, reply_markup=reply_markup, parse_mode='HTML')
+        _remember_sent_media(hw_id, raw_photo_ids, raw_doc_id, sent_photo_msgs=[p_msg], sent_doc_msg=d_msg)
         return
 
     media = []
@@ -1274,15 +1425,17 @@ def send_hw_media(chat_id, photo_ids, caption_html, reply_markup=None, doc_file_
             media.append(InputMediaPhoto(pid, caption=caption_html, parse_mode='HTML'))
         else:
             media.append(InputMediaPhoto(pid))
-    bot.send_media_group(chat_id, media)
+    p_msgs = bot.send_media_group(chat_id, media)
+    d_msg = None
     if has_doc:
-        bot.send_document(
+        d_msg = bot.send_document(
             chat_id,
             doc_file_id,
             caption=f'📎 <b>Прикреплённый файл:</b> {esc(doc_file_name or "Документ")}',
             reply_markup=(reply_markup if caption_fits else None),
             parse_mode='HTML',
         )
+    _remember_sent_media(hw_id, raw_photo_ids, raw_doc_id, sent_photo_msgs=p_msgs, sent_doc_msg=d_msg)
     if not caption_fits:
         send_long_html_message(chat_id, caption_html, reply_markup=reply_markup, parse_mode='HTML')
     elif not has_doc and reply_markup:
@@ -1325,7 +1478,7 @@ def _direct_send_message(user_id, text, reply_markup=None, parse_mode='HTML'):
         return 'error', 0
 
 
-def _direct_send_hw_media(user_id, photo_ids, caption_html, reply_markup=None, doc_file_id='', doc_file_name=''):
+def _direct_send_hw_media(user_id, photo_ids, caption_html, reply_markup=None, doc_file_id='', doc_file_name='', hw_id=None):
     try:
         send_hw_media(
             user_id,
@@ -1334,6 +1487,7 @@ def _direct_send_hw_media(user_id, photo_ids, caption_html, reply_markup=None, d
             reply_markup=reply_markup,
             doc_file_id=doc_file_id,
             doc_file_name=doc_file_name,
+            hw_id=hw_id,
         )
         return 'ok', 0
     except ApiTelegramException as e:
@@ -1595,18 +1749,24 @@ def can_manage_hw(user_obj):
     return bool(data and is_group_valid(data[7], data[0], data[1]))
 
 
-def get_main_keyboard(subscribed=False, is_starosta=False, is_hw_manager=False):
+def get_main_keyboard(subscribed=False, is_starosta=False, is_hw_manager=False, session_mode=False):
     markup = ReplyKeyboardMarkup(resize_keyboard=True, row_width=3)
-    markup.row(
-        KeyboardButton('📅 Сегодня'),
-        KeyboardButton('⏭ Завтра'),
-        KeyboardButton('🗓 Неделя'),
-    )
-    markup.row(
-        KeyboardButton('📚 Домашка'),
-        KeyboardButton('🎓 Сессия'),
-        KeyboardButton('🔍 Поиск'),
-    )
+    if session_mode:
+        markup.row(
+            KeyboardButton('🎓 Сессия'),
+            KeyboardButton('📚 Домашка'),
+            KeyboardButton('🔍 Поиск'),
+        )
+    else:
+        markup.row(
+            KeyboardButton('📅 Сегодня'),
+            KeyboardButton('⏭ Завтра'),
+            KeyboardButton('🗓 Неделя'),
+        )
+        markup.row(
+            KeyboardButton('📚 Домашка'),
+            KeyboardButton('🔍 Поиск'),
+        )
     if is_starosta:
         markup.row(
             KeyboardButton('⚙️ Настройки'),
@@ -1845,7 +2005,41 @@ def set_extra_hw_lists_enabled(faculty_code, group_name, enabled):
     with db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            'INSERT OR REPLACE INTO group_settings (faculty, group_name, extra_hw_lists) '
-            'VALUES (?, ?, ?)',
+            'INSERT INTO group_settings (faculty, group_name, extra_hw_lists, session_mode) '
+            'VALUES (?, ?, ?, 0) '
+            'ON CONFLICT(faculty, group_name) DO UPDATE SET extra_hw_lists = excluded.extra_hw_lists',
+            (eff_fac, group_name, val),
+        )
+
+
+def is_session_mode_enabled(faculty_code, group_name):
+    if not group_name:
+        return False
+    eff_fac = faculty_code or infer_faculty_by_group(group_name)
+    try:
+        with db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                'SELECT COALESCE(session_mode, 0) FROM group_settings '
+                'WHERE (faculty = ? OR faculty = "") AND group_name = ? LIMIT 1',
+                (eff_fac, group_name),
+            )
+            row = cursor.fetchone()
+        return bool(row and row[0] == 1)
+    except Exception:
+        return False
+
+
+def set_session_mode_enabled(faculty_code, group_name, enabled):
+    if not group_name:
+        return
+    eff_fac = faculty_code or infer_faculty_by_group(group_name)
+    val = 1 if enabled else 0
+    with db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            'INSERT INTO group_settings (faculty, group_name, extra_hw_lists, session_mode) '
+            'VALUES (?, ?, 0, ?) '
+            'ON CONFLICT(faculty, group_name) DO UPDATE SET session_mode = excluded.session_mode',
             (eff_fac, group_name, val),
         )
