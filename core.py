@@ -1134,8 +1134,23 @@ def safe_edit_message_text(text, chat_id, message_id, reply_markup=None, parse_m
             disable_web_page_preview=True,
         )
     except ApiTelegramException as e:
-        if 'message is not modified' in str(e).lower():
+        low_err = str(e).lower()
+        if 'message is not modified' in low_err:
             return None
+        if 'there is no text in the message to edit' in low_err and len(str(text or '')) <= 1024:
+            try:
+                return bot.edit_message_caption(
+                    caption=text,
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    reply_markup=reply_markup,
+                    parse_mode=parse_mode,
+                )
+            except ApiTelegramException as e_cap:
+                if 'message is not modified' in str(e_cap).lower():
+                    return None
+            except Exception:
+                pass
         if fallback_send:
             try:
                 return send_long_html_message(chat_id, text, reply_markup=reply_markup, parse_mode=parse_mode)
@@ -1812,14 +1827,7 @@ def build_course_keyboard(faculty_code):
 
 
 def get_lesson_type_badge(lesson_type):
-    """Возвращает цветовую метку типа занятия: 🟢 ЛК, 🟡 ПЗ/ПР/Сем, 🔴 Лаб/ЛР."""
-    low = str(lesson_type or '').lower()
-    if any(k in low for k in ('лаб', 'лр')):
-        return '🔴'
-    if any(k in low for k in ('пз', 'пр', 'практ', 'сем')):
-        return '🟡'
-    if any(k in low for k in ('лк', 'лекц')):
-        return '🟢'
+    """Возвращает единую иконку занятия."""
     return '📘'
 
 

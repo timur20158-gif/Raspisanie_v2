@@ -413,7 +413,7 @@ def get_day_schedule_plain(target_date, fac_code, course, group_name):
     if replacements:
         lines.append('⚡ ЗАМЕНЫ:')
         for r_time, r_subj in replacements:
-            lines.append(f'🟣 {format_pair_prefix(r_time)}')
+            lines.append(f'🔄 {format_pair_prefix(r_time)}')
             lines.append(f'👉 {r_subj}')
             lines.append('')
 
@@ -501,7 +501,7 @@ def get_week_schedule_plain(target_date, fac_code, course, group_name):
             for t_slot, subj, l_type, room in rows:
                 lines.append(f'  {format_pair_prefix(t_slot)} {get_lesson_type_badge(l_type)} {subj} ({l_type}), {room}')
             for r_t, r_s in repls:
-                lines.append(f'  🟣 [ЗАМЕНА] {format_pair_prefix(r_t)} — {r_s}')
+                lines.append(f'  🔄 [ЗАМЕНА] {format_pair_prefix(r_t)} — {r_s}')
 
     if not has_any:
         lines.append('\n✨ Пар на этой неделе нет.')

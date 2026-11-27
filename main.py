@@ -47,6 +47,7 @@ from core import (
     log_stat_event,
     now_local,
     parse_photo_ids,
+    safe_edit_message_text,
     send_db_backup,
     send_long_html_message,
     send_mascot_art,
@@ -159,12 +160,9 @@ def open_settings_menu(chat_id, user_obj, message_id=None):
     )
 
     if message_id:
-        try:
-            bot.edit_message_text(text, chat_id, message_id, reply_markup=markup, parse_mode='HTML')
-            return
-        except Exception:
-            pass
-    bot.send_message(chat_id, text, reply_markup=markup, parse_mode='HTML')
+        safe_edit_message_text(text, chat_id, message_id, reply_markup=markup, parse_mode='HTML')
+        return
+    send_mascot_art(chat_id, 'marten_settings', text, reply_markup=markup)
 
 
 @bot.message_handler(commands=['start'], chat_types=['private'])
@@ -251,8 +249,9 @@ def cmd_start(message):
         except Exception:
             pass
 
-    bot.send_message(
+    send_mascot_art(
         message.chat.id,
+        'marten_welcome',
         f'🐾 <b>С возвращением!</b> Куница на связи и готова к работе.\n\n'
         f'<blockquote>{group_info_block}'
         f'👤 <b>Статус:</b> {role_text}\n'
@@ -260,7 +259,6 @@ def cmd_start(message):
         f'🔔 <b>Уведомления (пары и ДЗ):</b> {notify_status}</blockquote>\n\n'
         f'👇 <i>Выбери нужное действие в меню ниже:</i>',
         reply_markup=get_main_keyboard(bool(subscribed), starosta_flag, hw_flag, session_mode=(is_session_mode_enabled(fac_code, group_name) if has_valid_group else False)),
-        parse_mode='HTML',
     )
 
 
@@ -381,11 +379,13 @@ def handle_menu(message):
         log_stat_event('tomorrow')
         tomorrow_dt = now_local() + timedelta(days=1)
         text = get_schedule_text(tomorrow_dt, course, group_name, faculty_code=fac_code)
-        send_long_html_message(
+        is_chill = any(k in text for k in ('свернулась калачиком', 'пар на этот день нет', 'внезапный выходной'))
+        art_key = 'marten_chill' if is_chill else 'marten_classes'
+        send_mascot_art(
             user_id,
+            art_key,
             text,
             reply_markup=get_pagination_keyboard(1, group_name),
-            parse_mode='HTML',
         )
         return
 
@@ -417,7 +417,7 @@ def handle_onboarding_and_settings_callbacks(call):
     if data == 'cancel_action':
         clear_user_state(user_id)
         try:
-            bot.edit_message_text('❌ Действие отменено.', chat_id, msg_id)
+            safe_edit_message_text('❌ Действие отменено.', chat_id, msg_id)
         except Exception:
             pass
         return
@@ -425,16 +425,13 @@ def handle_onboarding_and_settings_callbacks(call):
     # --- ВЫБОР ФАКУЛЬТЕТА -> КУРСА -> НАПРАВЛЕНИЯ ---
     if data == 'back_to_faculties':
         clear_user_state(user_id)
-        try:
-            bot.edit_message_text(
-                '🏛 <b>Выбор факультета</b>\n\n👇 Выбери свой <b>факультет</b>:',
-                chat_id,
-                msg_id,
-                reply_markup=build_faculty_keyboard(),
-                parse_mode='HTML',
-            )
-        except Exception:
-            pass
+        safe_edit_message_text(
+            '🏛 <b>Выбор факультета</b>\n\n👇 Выбери свой <b>факультет</b>:',
+            chat_id,
+            msg_id,
+            reply_markup=build_faculty_keyboard(),
+            parse_mode='HTML',
+        )
         return
 
     if data.startswith('sel_fac_'):
@@ -463,17 +460,14 @@ def handle_onboarding_and_settings_callbacks(call):
             return
 
         set_user_state(user_id, '', {'faculty': fac_code})
-        try:
-            bot.edit_message_text(
-                f'{meta["emoji"]} Выбран факультет: <b>{esc(meta["full"])} ({esc(meta["short"])})</b>.\n\n'
-                f'👇 Теперь выбери свой <b>курс</b>:',
-                chat_id,
-                msg_id,
-                reply_markup=build_course_keyboard(fac_code),
-                parse_mode='HTML',
-            )
-        except Exception:
-            pass
+        safe_edit_message_text(
+            f'{meta["emoji"]} Выбран факультет: <b>{esc(meta["full"])} ({esc(meta["short"])})</b>.\n\n'
+            f'👇 Теперь выбери свой <b>курс</b>:',
+            chat_id,
+            msg_id,
+            reply_markup=build_course_keyboard(fac_code),
+            parse_mode='HTML',
+        )
         return
 
     if data.startswith('sel_course_'):
@@ -496,17 +490,14 @@ def handle_onboarding_and_settings_callbacks(call):
             'course': course,
             'current_groups': groups,
         })
-        try:
-            bot.edit_message_text(
-                f'🏛 <b>{esc(get_faculty_short(fac_code))}</b>  •  ✅ Выбран <b>{course} курс</b>.\n\n'
-                f'👇 Теперь укажи своё <b>направление подготовки</b>:',
-                chat_id,
-                msg_id,
-                reply_markup=markup,
-                parse_mode='HTML',
-            )
-        except Exception:
-            pass
+        safe_edit_message_text(
+            f'🏛 <b>{esc(get_faculty_short(fac_code))}</b>  •  ✅ Выбран <b>{course} курс</b>.\n\n'
+            f'👇 Теперь укажи своё <b>направление подготовки</b>:',
+            chat_id,
+            msg_id,
+            reply_markup=markup,
+            parse_mode='HTML',
+        )
         return
 
     if data.startswith('sel_group_'):
@@ -650,16 +641,13 @@ def handle_onboarding_and_settings_callbacks(call):
 
     if data == 'settings_change_group':
         clear_user_state(user_id)
-        try:
-            bot.edit_message_text(
-                '🏛 <b>Смена факультета и группы</b>\n\n👇 Выбери свой <b>факультет</b>:',
-                chat_id,
-                msg_id,
-                reply_markup=build_faculty_keyboard(),
-                parse_mode='HTML',
-            )
-        except Exception:
-            pass
+        safe_edit_message_text(
+            '🏛 <b>Смена факультета и группы</b>\n\n👇 Выбери свой <b>факультет</b>:',
+            chat_id,
+            msg_id,
+            reply_markup=build_faculty_keyboard(),
+            parse_mode='HTML',
+        )
         return
 
     if data == 'settings_report_bug':
@@ -667,24 +655,15 @@ def handle_onboarding_and_settings_callbacks(call):
         set_user_state(user_id, 'awaiting_bug_report', {})
         markup = InlineKeyboardMarkup(row_width=1)
         markup.add(InlineKeyboardButton('❌ Отмена', callback_data='cancel_action'))
-        try:
-            bot.edit_message_text(
-                '📩 <b>СООБЩИТЬ ОБ ОШИБКЕ</b>\n\n'
-                'Опиши проблему или опечатку в расписании одним сообщением (можно прикрепить скриншот).\n'
-                '<i>Администратор сразу получит твоё сообщение вместе с данными твоей группы.</i>',
-                chat_id,
-                msg_id,
-                reply_markup=markup,
-                parse_mode='HTML',
-            )
-        except Exception:
-            bot.send_message(
-                chat_id,
-                '📩 <b>СООБЩИТЬ ОБ ОШИБКЕ</b>\n\n'
-                'Опиши проблему или опечатку в расписании одним сообщением (можно прикрепить скриншот):',
-                reply_markup=markup,
-                parse_mode='HTML',
-            )
+        safe_edit_message_text(
+            '📩 <b>СООБЩИТЬ ОБ ОШИБКЕ</b>\n\n'
+            'Опиши проблему или опечатку в расписании одним сообщением (можно прикрепить скриншот).\n'
+            '<i>Администратор сразу получит твоё сообщение вместе с данными твоей группы.</i>',
+            chat_id,
+            msg_id,
+            reply_markup=markup,
+            parse_mode='HTML',
+        )
         return
 
     if data == 'settings_restart':

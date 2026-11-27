@@ -364,7 +364,7 @@ def get_schedule_text(target_date, course, group_name, faculty_code=None):
         for r_time, r_subj in replacements:
             r_prefix = format_pair_prefix(r_time)
             body += (
-                f'🟣 {r_prefix}\n'
+                f'🔄 {r_prefix}\n'
                 f'👉 <b>{esc(r_subj)}</b>\n'
             )
             r_key = r_subj.strip().lower()
@@ -503,7 +503,7 @@ def get_week_schedule_text(target_date, course, group_name, faculty_code=None):
                 )
             for r_time, r_subj in replacements:
                 r_prefix = format_pair_prefix(r_time)
-                text += f'🟣 <b>[ЗАМЕНА]</b> {r_prefix} — <b>{esc(r_subj)}</b>\n'
+                text += f'🔄 <b>[ЗАМЕНА]</b> {r_prefix} — <b>{esc(r_subj)}</b>\n'
 
     if not has_any:
         text += '\n✨ <i>На этой неделе учебных пар в расписании не нашлось.</i>'
@@ -528,7 +528,7 @@ def send_week_schedule_message(chat_id, target_date, course, group_name, week_of
                 return
             except Exception:
                 pass
-        bot.send_message(chat_id, chunks[0], reply_markup=markup, parse_mode='HTML')
+        send_mascot_art(chat_id, 'marten_week', chunks[0], reply_markup=markup)
     else:
         if edit_msg_id:
             try:
@@ -742,11 +742,8 @@ def open_search_menu(chat_id, message_id=None):
         '• <b>Свободные аудитории</b> — пустые кабинеты на нужный день и пару.'
     )
     if message_id:
-        try:
-            bot.edit_message_text(text, chat_id, message_id, reply_markup=markup, parse_mode='HTML')
-            return
-        except Exception:
-            pass
+        safe_edit_message_text(text, chat_id, message_id, reply_markup=markup, parse_mode='HTML')
+        return
     send_mascot_art(chat_id, 'marten_search', text, reply_markup=markup)
 
 
@@ -769,11 +766,8 @@ def show_teacher_period_choice(chat_id, msg_id=None):
         '<b>Шаг 1 из 2.</b> Выбери период, за который нужно найти пары преподавателя:'
     )
     if msg_id:
-        try:
-            bot.edit_message_text(text, chat_id, msg_id, reply_markup=markup, parse_mode='HTML')
-            return
-        except Exception:
-            pass
+        safe_edit_message_text(text, chat_id, msg_id, reply_markup=markup, parse_mode='HTML')
+        return
     bot.send_message(chat_id, text, reply_markup=markup, parse_mode='HTML')
 
 
@@ -1122,11 +1116,8 @@ def show_free_rooms_day_choice(chat_id, msg_id=None):
         '<b>Шаг 1 из 2.</b> Выбери день недели:'
     )
     if msg_id:
-        try:
-            bot.edit_message_text(text, chat_id, msg_id, reply_markup=markup, parse_mode='HTML')
-            return
-        except Exception:
-            pass
+        safe_edit_message_text(text, chat_id, msg_id, reply_markup=markup, parse_mode='HTML')
+        return
     bot.send_message(chat_id, text, reply_markup=markup, parse_mode='HTML')
 
 
@@ -1156,11 +1147,8 @@ def show_free_rooms_pair_choice(chat_id, msg_id=None, day_offset=0):
         f'<b>Шаг 2 из 2.</b> Выбери номер пары:'
     )
     if msg_id:
-        try:
-            bot.edit_message_text(text, chat_id, msg_id, reply_markup=markup, parse_mode='HTML')
-            return
-        except Exception:
-            pass
+        safe_edit_message_text(text, chat_id, msg_id, reply_markup=markup, parse_mode='HTML')
+        return
     bot.send_message(chat_id, text, reply_markup=markup, parse_mode='HTML')
 
 
@@ -1289,10 +1277,7 @@ def show_free_rooms_result(chat_id, msg_id, pair_num, day_offset=0, user_id=None
         InlineKeyboardButton('🔄 Выбрать другую пару', callback_data=f'freerooms_day_{day_offset}'),
         InlineKeyboardButton('🔙 В меню поиска', callback_data='search_back'),
     )
-    try:
-        bot.edit_message_text(text, chat_id, msg_id, reply_markup=markup, parse_mode='HTML')
-    except Exception:
-        bot.send_message(chat_id, text, reply_markup=markup, parse_mode='HTML')
+    safe_edit_message_text(text, chat_id, msg_id, reply_markup=markup, parse_mode='HTML')
 
 
 @bot.inline_handler(func=lambda query: True)
@@ -1635,11 +1620,8 @@ def handle_schedule_and_search_callbacks(call):
         )
         kb = get_pagination_keyboard(offset, group_name)
         if len(text) <= 4000:
-            try:
-                bot.edit_message_text(text, chat_id, msg_id, reply_markup=kb, parse_mode='HTML')
-                return
-            except Exception:
-                pass
+            safe_edit_message_text(text, chat_id, msg_id, reply_markup=kb, parse_mode='HTML')
+            return
         else:
             try:
                 bot.delete_message(chat_id, msg_id)

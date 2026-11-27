@@ -231,12 +231,9 @@ def open_add_homework(chat_id, user_obj, message_id=None):
         f'бот сам прикрепит ДЗ к ближайшей следующей паре по расписанию:'
     )
     if message_id:
-        try:
-            bot.edit_message_text(text, chat_id, message_id, reply_markup=markup, parse_mode='HTML')
-            return
-        except Exception:
-            pass
-    bot.send_message(chat_id, text, reply_markup=markup, parse_mode='HTML')
+        safe_edit_message_text(text, chat_id, message_id, reply_markup=markup, parse_mode='HTML')
+        return
+    send_mascot_art(chat_id, 'marten_homework', text, reply_markup=markup)
 
 
 def open_add_homework_by_date(chat_id, user_obj, message_id=None):

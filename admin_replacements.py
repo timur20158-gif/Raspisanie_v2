@@ -167,7 +167,7 @@ def open_special_group_menu(chat_id, user_obj, message_id=None):
     if message_id:
         safe_edit_message_text(text, chat_id, message_id, reply_markup=markup, parse_mode='HTML')
     else:
-        bot.send_message(chat_id, text, reply_markup=markup, parse_mode='HTML')
+        send_mascot_art(chat_id, 'marten_admin', text, reply_markup=markup)
 
 
 def open_special_system_menu(chat_id, user_obj, message_id=None):
@@ -185,7 +185,7 @@ def open_special_system_menu(chat_id, user_obj, message_id=None):
     if message_id:
         safe_edit_message_text(text, chat_id, message_id, reply_markup=markup, parse_mode='HTML')
     else:
-        bot.send_message(chat_id, text, reply_markup=markup, parse_mode='HTML')
+        send_mascot_art(chat_id, 'marten_admin', text, reply_markup=markup)
 
 
 def open_special_menu(chat_id, user_obj, message_id=None):
@@ -229,7 +229,7 @@ def open_special_menu(chat_id, user_obj, message_id=None):
     if message_id:
         safe_edit_message_text(text, chat_id, message_id, reply_markup=markup, parse_mode='HTML')
     else:
-        bot.send_message(chat_id, text, reply_markup=markup, parse_mode='HTML')
+        send_mascot_art(chat_id, 'marten_admin', text, reply_markup=markup)
 
 
 def notify_users_new_academic_year(user_ids, new_year_label, exclude_user_id=None):
@@ -1493,12 +1493,9 @@ def open_broadcast_menu(chat_id, user_obj, message_id=None):
         'Выбери, кому отправить сообщение от деканата / администрации:'
     )
     if message_id:
-        try:
-            bot.edit_message_text(text, chat_id, message_id, reply_markup=markup, parse_mode='HTML')
-            return
-        except Exception:
-            pass
-    bot.send_message(chat_id, text, reply_markup=markup, parse_mode='HTML')
+        safe_edit_message_text(text, chat_id, message_id, reply_markup=markup, parse_mode='HTML')
+        return
+    send_mascot_art(chat_id, 'marten_admin', text, reply_markup=markup)
 
 
 @bot.message_handler(commands=['broadcast'], chat_types=['private'])
