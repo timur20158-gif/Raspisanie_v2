@@ -513,7 +513,7 @@ def get_week_pagination_keyboard(week_offset=0):
 
 
 TEACHER_SURNAME_INIT_RE = re.compile(
-    r'([А-ЯЁ][а-яё]+(?:-[А-ЯЁ][а-яё]+)?)\s+([А-ЯЁ])\.\s*([А-ЯЁ])\.'
+    r'([А-ЯЁ][а-яё]{2,}(?:-[А-ЯЁ][а-яё]{2,})?)\s+([А-ЯЁ])\.\s*([А-ЯЁ])\.?'
 )
 
 TEACHER_RANK_PREFIX_RE = re.compile(
@@ -526,16 +526,30 @@ TEACHER_RANK_SUFFIX_RE = re.compile(
     re.IGNORECASE,
 )
 
+_LATIN_TO_CYR_MAP = str.maketrans({
+    'A': 'А', 'B': 'В', 'C': 'С', 'E': 'Е', 'H': 'Н', 'K': 'К',
+    'M': 'М', 'O': 'О', 'P': 'Р', 'T': 'Т', 'X': 'Х',
+    'a': 'а', 'c': 'с', 'e': 'е', 'o': 'о', 'p': 'р', 'x': 'х',
+})
+
+_TEACHER_STOPWORDS = {
+    'не указан', 'вакансия', 'доц', 'доцент', 'проф', 'профессор',
+    'преп', 'преподаватель', 'асс', 'ассистент', 'кафедра', 'каф',
+    'ауд', 'зал', 'спортзал', 'поток', 'нет',
+}
+
 
 def _format_surname_part(surname_raw):
     s = re.sub(r'[^а-яёА-ЯЁ-]', '', str(surname_raw or '')).strip('-')
-    if not s:
+    if not s or len(s) < 3:
+        return ''
+    if s.lower() in _TEACHER_STOPWORDS:
         return ''
     return '-'.join(part.capitalize() for part in s.split('-') if part)
 
 
 def extract_teacher_surname_initials(raw_teacher):
-    txt = re.sub(r'\s+', ' ', str(raw_teacher or '')).strip()
+    txt = re.sub(r'\s+', ' ', str(raw_teacher or '')).translate(_LATIN_TO_CYR_MAP).strip()
     if not txt or txt.lower() in ('не указан', '-', '—', 'нет', 'вакансия'):
         return ''
 
@@ -548,8 +562,7 @@ def extract_teacher_surname_initials(raw_teacher):
             if sub_norm and sub_norm.lower() not in seen_low:
                 seen_low.add(sub_norm.lower())
                 norm_parts.append(sub_norm)
-        if norm_parts:
-            return ', '.join(norm_parts)
+        return ', '.join(norm_parts)
 
     m = TEACHER_SURNAME_INIT_RE.search(txt)
     if m:
@@ -566,33 +579,35 @@ def extract_teacher_surname_initials(raw_teacher):
             break
         cleaned = next_c
 
+    if not cleaned:
+        return ''
+
     m_no_dot = re.search(
-        r'([А-ЯЁа-яё]+(?:-[А-ЯЁа-яё]+)?)\s+([А-ЯЁа-яё])\.?\s*([А-ЯЁа-яё])\.?$',
+        r'([А-ЯЁа-яё]{3,}(?:-[А-ЯЁа-яё]{2,})?)\s+([А-ЯЁа-яё])\.?\s*([А-ЯЁа-яё])\.?$',
         cleaned,
     )
     if m_no_dot:
         s_part, i1, i2 = m_no_dot.groups()
         f_sur = _format_surname_part(s_part)
-        if f_sur and len(f_sur) >= 2:
+        if f_sur:
             return f'{f_sur} {i1.upper()}.{i2.upper()}.'
 
-    if not cleaned:
-        cleaned = txt
-
     words = [w.strip(' ,;-–—/.()') for w in cleaned.split() if w.strip(' ,;-–—/.()')]
-    if len(words) == 1 and re.fullmatch(r'[а-яёА-ЯЁ-]+', words[0]):
+    if len(words) == 1 and re.fullmatch(r'[а-яёА-ЯЁ-]{3,}', words[0]):
         return _format_surname_part(words[0])
-    if words and re.fullmatch(r'[а-яёА-ЯЁ-]+', words[0]) and len(words[0]) >= 3:
+    if words and re.fullmatch(r'[а-яёА-ЯЁ-]{3,}', words[0]):
+        f_sur = _format_surname_part(words[0])
+        if not f_sur:
+            return ''
         if len(words) >= 2 and re.fullmatch(r'[а-яёА-ЯЁ]\.?$', words[1]):
             init1 = words[1][0].upper()
             init2 = words[2][0].upper() if len(words) >= 3 and re.fullmatch(r'[а-яёА-ЯЁ]\.?$', words[2]) else ''
-            f_sur = _format_surname_part(words[0])
             if init2:
                 return f'{f_sur} {init1}.{init2}.'
             return f'{f_sur} {init1}.'
-        return _format_surname_part(words[0])
+        return f_sur
 
-    return cleaned
+    return ''
 
 
 def _teacher_surname_only(teacher_norm):
