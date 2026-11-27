@@ -32,7 +32,9 @@ from core import (
     format_pair_prefix as tg_format_pair_prefix,
     get_bound_group_chats,
     get_current_week_and_day,
+    build_progress_bar,
     get_faculty_short,
+    get_lesson_type_badge,
     infer_faculty_by_group,
     is_session_mode_enabled,
     log_stat_event,
@@ -396,22 +398,22 @@ def get_day_schedule_plain(target_date, fac_code, course, group_name):
     if week_num <= 0 and not replacements:
         lines.append(f'⏳ Учебный год стартует с {core.ACADEMIC_YEAR_START_DATE.strftime("%d.%m.%Y")}.')
     elif day_name == 'Воскресенье' and not replacements:
-        lines.append('🎉 Воскресенье — выходной!')
+        lines.append('🐾 Воскресенье — Куница свернулась калачиком и отдыхает!')
     elif week_num in core.PRACTICE_WEEKS.get(group_name, set()) and not replacements:
         lines.append('🛠 На этой неделе у группы проходит практика.')
     elif not rows and not replacements:
-        lines.append('✨ Пар на этот день нет!')
+        lines.append('🐾 Куница проверила расписание — пар на этот день нет!')
     else:
         for time_slot, subj, l_type, teacher, room in rows:
             lines.append(f'{format_pair_prefix(time_slot)}')
-            lines.append(f'📘 {subj} ({l_type})')
+            lines.append(f'{get_lesson_type_badge(l_type)} {subj} ({l_type})')
             lines.append(f'📍 {room} • 👤 {teacher}')
             lines.append('')
 
     if replacements:
         lines.append('⚡ ЗАМЕНЫ:')
         for r_time, r_subj in replacements:
-            lines.append(f'🔄 {format_pair_prefix(r_time)}')
+            lines.append(f'🟣 {format_pair_prefix(r_time)}')
             lines.append(f'👉 {r_subj}')
             lines.append('')
 
@@ -497,9 +499,9 @@ def get_week_schedule_plain(target_date, fac_code, course, group_name):
             has_any = True
             lines.append(f'\n🔹 {d_name.upper()} ({dt.strftime("%d.%m")})')
             for t_slot, subj, l_type, room in rows:
-                lines.append(f'  {format_pair_prefix(t_slot)} — {subj} ({l_type}), {room}')
+                lines.append(f'  {format_pair_prefix(t_slot)} {get_lesson_type_badge(l_type)} {subj} ({l_type}), {room}')
             for r_t, r_s in repls:
-                lines.append(f'  🔄 [ЗАМЕНА] {format_pair_prefix(r_t)} — {r_s}')
+                lines.append(f'  🟣 [ЗАМЕНА] {format_pair_prefix(r_t)} — {r_s}')
 
     if not has_any:
         lines.append('\n✨ Пар на этой неделе нет.')
@@ -1125,17 +1127,25 @@ def send_vk_session_view(vk, peer_id, user):
         rows = cursor.fetchall()
 
     upcoming = []
+    total_valid = 0
+    passed_cnt = 0
     for r in rows:
         try:
             d_obj = datetime.strptime(r[1], '%d.%m.%Y').date()
         except ValueError:
             continue
+        total_valid += 1
         if d_obj >= today:
             upcoming.append((d_obj, r))
+        else:
+            passed_cnt += 1
     upcoming.sort(key=lambda x: (x[0], x[1][2] or '', x[1][0]))
 
     can_edit = user['is_starosta'] == 1 and (user['managed_group'] or group_name) == group_name
-    lines = [f'🎓 РАСПИСАНИЕ СЕССИИ ({group_name})', '']
+    lines = [f'🎓 РАСПИСАНИЕ СЕССИИ ({group_name})']
+    if total_valid > 0:
+        lines.append(f'🐾 Прогресс: {build_progress_bar(passed_cnt, total_valid, width=10)} (позади {passed_cnt}/{total_valid})')
+    lines.append('')
     kb = VkKeyboard(inline=True)
     btn_rows = 0
 
@@ -1248,7 +1258,7 @@ def handle_message(vk, user_id, peer_id, text, raw_payload=None, attachments=Non
         send_vk_msg(
             vk,
             peer_id,
-            '👋 Привет! Я бот расписания СИ УУНиТ (общая база с Telegram).\n\nВыбери свой факультет:',
+            '🐾 Привет! Я — Куница-помощник СИ УУНиТ (общая база с Telegram).\n\nВыбери свой факультет:',
             keyboard=build_faculties_kb(),
         )
         return

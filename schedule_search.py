@@ -17,6 +17,7 @@ from core import (
     PAIR_EMOJIS,
     bot,
     build_faculty_keyboard,
+    build_progress_bar,
     calc_week_number_for_start,
     clear_user_state,
     db_connection,
@@ -26,6 +27,7 @@ from core import (
     get_bot_username,
     get_current_week_and_day,
     get_faculty_short,
+    get_lesson_type_badge,
     get_pair_num,
     get_group_chat_binding,
     get_user_data,
@@ -37,6 +39,7 @@ from core import (
     parse_photo_ids,
     safe_edit_message_text,
     send_long_html_message,
+    send_mascot_art,
     set_user_state,
     short_text,
     split_long_html_message,
@@ -190,6 +193,63 @@ def get_homeworks_for_date(group_name, date_str, faculty_code=None):
     return rows
 
 
+def _build_today_live_status_line(rows, replacements, now_dt):
+    """Возвращает строку живого статуса для сегодняшнего расписания (прогресс-бар текущей пары или отсчёт перемены)."""
+    slots_info = []
+    for time_slot, subject, l_type, teacher, room, _ in rows:
+        parts = str(time_slot or '').split('-')
+        if len(parts) != 2:
+            continue
+        try:
+            st_t = datetime.strptime(parts[0].strip(), '%H:%M').time()
+            en_t = datetime.strptime(parts[1].strip(), '%H:%M').time()
+        except ValueError:
+            continue
+        p_num = get_pair_num(time_slot)
+        slots_info.append((st_t, en_t, p_num, room, subject))
+    for r_time, r_subj in replacements:
+        parts = str(r_time or '').split('-')
+        if len(parts) != 2:
+            continue
+        try:
+            st_t = datetime.strptime(parts[0].strip(), '%H:%M').time()
+            en_t = datetime.strptime(parts[1].strip(), '%H:%M').time()
+        except ValueError:
+            continue
+        p_num = get_pair_num(r_time)
+        slots_info.append((st_t, en_t, p_num, '', r_subj))
+
+    if not slots_info:
+        return ''
+    slots_info.sort(key=lambda x: x[0])
+    now_t = now_dt.time()
+    now_min = now_t.hour * 60 + now_t.minute
+
+    for st_t, en_t, p_num, room, subj in slots_info:
+        st_m = st_t.hour * 60 + st_t.minute
+        en_m = en_t.hour * 60 + en_t.minute
+        if st_m <= now_min < en_m:
+            elapsed = now_min - st_m
+            total = max(1, en_m - st_m)
+            left_m = en_m - now_min
+            bar = build_progress_bar(elapsed, total, width=10)
+            p_lbl = f'{p_num}-я пара' if p_num else 'пара'
+            return f'🐾 <b>Идёт {p_lbl}:</b> <code>{bar}</code> <i>(осталось {left_m} мин)</i>\n\n'
+
+    for st_t, en_t, p_num, room, subj in slots_info:
+        st_m = st_t.hour * 60 + st_t.minute
+        if now_min < st_m:
+            wait_m = st_m - now_min
+            p_lbl = f'{p_num}-й пары' if p_num else 'пары'
+            room_p = f' ({esc(room)})' if room else ''
+            if wait_m <= 65:
+                return f'🐾 <b>Перемена</b> • до {p_lbl}{room_p}: <b>{wait_m} мин</b>\n\n'
+            hrs, mins = divmod(wait_m, 60)
+            return f'🐾 <b>До {p_lbl}{room_p}:</b> {hrs} ч {mins} мин\n\n'
+
+    return '🐾 <i>Все пары на сегодня уже закончились — можно выдохнуть!</i>\n\n'
+
+
 def get_schedule_text(target_date, course, group_name, faculty_code=None):
     if not faculty_code:
         _, faculty_code = find_course_and_faculty_by_group(group_name)
@@ -257,21 +317,25 @@ def get_schedule_text(target_date, course, group_name, faculty_code=None):
             'Как только оно появится, бот уведомит об этом!</i>\n\n'
         )
     elif day_name == 'Воскресенье' and not replacements:
-        body = '🎉 <i>Сегодня воскресенье — законный выходной! Набирайся сил перед новой учебной неделей.</i>\n\n'
+        body = '🐾 <i>Воскресенье — Куница свернулась калачиком и отдыхает! Набирайся сил перед новой учебной неделей.</i>\n\n'
     elif week_number in core.PRACTICE_WEEKS.get(group_name, set()) and not replacements:
         body = '🛠 <i>На этой неделе аудиторных пар нет — у группы проходит учебная или производственная практика.</i>\n\n'
     elif not rows and not replacements:
         if cancelled_slots:
-            body = '✨ <i>Все пары на этот день были отменены — можно спокойно отдохнуть или заняться своими делами!</i>\n\n'
+            body = '🐾 <i>Все пары на этот день отменены — Куница одобряет внезапный выходной!</i>\n\n'
         else:
-            body = '✨ <i>На этот день пар по расписанию нет — можно спокойно отдохнуть или заняться своими делами!</i>\n\n'
+            body = '🐾 <i>Куница проверила расписание — пар на этот день нет, можно спокойно отдохнуть!</i>\n\n'
     else:
+        now_dt = now_local()
+        if target_date.date() == now_dt.date():
+            body += _build_today_live_status_line(rows, replacements, now_dt)
         for row in rows:
             time_slot, subject, l_type, teacher, room, weeks_raw = row
             pair_prefix = format_pair_prefix(time_slot)
+            l_badge = get_lesson_type_badge(l_type)
             body += (
                 f'{pair_prefix}\n'
-                f'📘 <b>{esc(subject)}</b> <i>({esc(l_type)})</i>\n'
+                f'{l_badge} <b>{esc(subject)}</b> <i>({esc(l_type)})</i>\n'
                 f'📍 <u>{esc(room)}</u>  •  👤 <i>{esc(teacher)}</i>\n'
                 f'🗓 <code>Недели: {esc(weeks_raw)}</code>\n'
             )
@@ -300,7 +364,7 @@ def get_schedule_text(target_date, course, group_name, faculty_code=None):
         for r_time, r_subj in replacements:
             r_prefix = format_pair_prefix(r_time)
             body += (
-                f'🔄 {r_prefix}\n'
+                f'🟣 {r_prefix}\n'
                 f'👉 <b>{esc(r_subj)}</b>\n'
             )
             r_key = r_subj.strip().lower()
@@ -434,12 +498,12 @@ def get_week_schedule_text(target_date, course, group_name, faculty_code=None):
             for time_slot, subject, l_type, teacher, room in rows:
                 pair_prefix = format_pair_prefix(time_slot)
                 text += (
-                    f'{pair_prefix} — <b>{esc(subject)}</b> <i>({esc(l_type)})</i>\n'
+                    f'{pair_prefix} {get_lesson_type_badge(l_type)} <b>{esc(subject)}</b> <i>({esc(l_type)})</i>\n'
                     f'   📍 <u>{esc(room)}</u> · 👤 <i>{esc(teacher)}</i>\n'
                 )
             for r_time, r_subj in replacements:
                 r_prefix = format_pair_prefix(r_time)
-                text += f'🔄 <b>[ЗАМЕНА]</b> {r_prefix} — <b>{esc(r_subj)}</b>\n'
+                text += f'🟣 <b>[ЗАМЕНА]</b> {r_prefix} — <b>{esc(r_subj)}</b>\n'
 
     if not has_any:
         text += '\n✨ <i>На этой неделе учебных пар в расписании не нашлось.</i>'
@@ -672,9 +736,10 @@ def open_search_menu(chat_id, message_id=None):
         InlineKeyboardButton('🚪 Свободные аудитории', callback_data='search_rooms'),
     )
     text = (
-        '🔍 <b>УМНЫЙ ПОИСК ПО ИНСТИТУТУ</b>\n\n'
-        '• <b>Где преподаватель?</b> — поиск по всем факультетам на <i>сегодня</i>, <i>завтра</i> или <i>всю учебную неделю</i> с автодополнением фамилий.\n'
-        '• <b>Свободные аудитории</b> — проверка пустых кабинетов на выбранный день и пару.'
+        '🐾 <b>ПОИСК ПО ИНСТИТУТУ</b>\n\n'
+        'Куница поможет быстро найти:\n'
+        '• <b>Где преподаватель?</b> — по твоей группе, факультету или всему институту на <i>сегодня</i>, <i>завтра</i> или <i>неделю</i>.\n'
+        '• <b>Свободные аудитории</b> — пустые кабинеты на нужный день и пару.'
     )
     if message_id:
         try:
@@ -682,7 +747,7 @@ def open_search_menu(chat_id, message_id=None):
             return
         except Exception:
             pass
-    bot.send_message(chat_id, text, reply_markup=markup, parse_mode='HTML')
+    send_mascot_art(chat_id, 'marten_search', text, reply_markup=markup)
 
 
 def show_teacher_period_choice(chat_id, msg_id=None):

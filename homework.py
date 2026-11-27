@@ -38,6 +38,7 @@ from core import (
     safe_edit_message_text,
     send_hw_media,
     send_long_html_message,
+    send_mascot_art,
     serialize_photo_ids,
     set_user_state,
     short_text,
@@ -1205,12 +1206,7 @@ def open_homework_menu(message):
         return
 
     text, markup = _build_homework_menu_payload(message.from_user, user[1])
-    bot.send_message(
-        message.chat.id,
-        text,
-        reply_markup=markup,
-        parse_mode='HTML',
-    )
+    send_mascot_art(message.chat.id, 'marten_homework', text, reply_markup=markup)
 
 
 def _clean_slot_display_label(raw_label):

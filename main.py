@@ -49,6 +49,7 @@ from core import (
     parse_photo_ids,
     send_db_backup,
     send_long_html_message,
+    send_mascot_art,
     set_user_state,
     split_long_html_message,
     start_onboarding,
@@ -89,6 +90,7 @@ from homework import (
     start_add_homework,
 )
 from schedule_search import (
+    get_day_lessons_for_date,
     get_homeworks_for_date,
     get_pagination_keyboard,
     get_schedule_text,
@@ -251,7 +253,7 @@ def cmd_start(message):
 
     bot.send_message(
         message.chat.id,
-        f'👋 <b>С возвращением!</b> Бот готов к работе.\n\n'
+        f'🐾 <b>С возвращением!</b> Куница на связи и готова к работе.\n\n'
         f'<blockquote>{group_info_block}'
         f'👤 <b>Статус:</b> {role_text}\n'
         f'🗓 <b>Авторассылка:</b> {sub_status}\n'
@@ -365,11 +367,13 @@ def handle_menu(message):
     if 'сегодня' in text_lower:
         log_stat_event('today')
         text = get_schedule_text(now_local(), course, group_name, faculty_code=fac_code)
-        send_long_html_message(
+        is_chill = any(k in text for k in ('свернулась калачиком', 'пар на этот день нет', 'внезапный выходной'))
+        art_key = 'marten_chill' if is_chill else 'marten_classes'
+        send_mascot_art(
             user_id,
+            art_key,
             text,
             reply_markup=get_pagination_keyboard(0, group_name),
-            parse_mode='HTML',
         )
         return
 
@@ -991,12 +995,17 @@ def _run_scheduled_mailing(day_offset, greeting_line, day_label_genitive, sub_co
                 sess_txt = _get_session_reminder_for_group(fac_code, group_name, is_vk=False)
                 group_cache[cache_key] = ('session', sess_txt, None, [], [])
             else:
+                hw_rows_for_grp = get_homeworks_for_date(group_name, target_str, faculty_code=fac_code)
+                if target_dt.weekday() == 5:
+                    sat_slots, _ = get_day_lessons_for_date(target_dt, course, group_name, faculty_code=fac_code)
+                    if not sat_slots and not hw_rows_for_grp:
+                        group_cache[cache_key] = ('skip', None, None, [], [])
+                        continue
                 text = (
                     f'{greeting_line}\n\n'
                     + get_schedule_text(target_dt, course, group_name, faculty_code=fac_code)
                 )
                 kb = get_pagination_keyboard(day_offset, group_name)
-                hw_rows_for_grp = get_homeworks_for_date(group_name, target_str, faculty_code=fac_code)
                 attachments = []
                 for _, hw_subj, hw_text, hw_photo, hw_doc_id, hw_doc_name in hw_rows_for_grp:
                     photo_ids = parse_photo_ids(hw_photo)
@@ -1010,6 +1019,8 @@ def _run_scheduled_mailing(day_offset, greeting_line, day_label_genitive, sub_co
                 group_cache[cache_key] = ('regular', text, kb, attachments, hw_rows_for_grp)
 
         mode_tag, text, kb, attachments, hw_rows_tmr = group_cache[cache_key]
+        if mode_tag == 'skip':
+            continue
         if mode_tag == 'session':
             if text:
                 enqueue_message(u_id, text, parse_mode='HTML')
@@ -1047,9 +1058,16 @@ def _run_scheduled_mailing(day_offset, greeting_line, day_label_genitive, sub_co
                     if is_session_mode_enabled(v_fac, v_grp):
                         vk_cache[v_key] = ('session', _get_session_reminder_for_group(v_fac, v_grp, is_vk=True), [])
                     else:
-                        v_hws = get_homeworks_for_date(v_grp, target_str, faculty_code=v_fac) if day_offset == 1 else []
-                        vk_cache[v_key] = ('regular', f'{vk_greet}\n\n' + vk_bot.get_day_schedule_plain(target_dt, v_fac, v_crs, v_grp), v_hws)
+                        v_hws = get_homeworks_for_date(v_grp, target_str, faculty_code=v_fac)
+                        if target_dt.weekday() == 5:
+                            v_sat_slots, _ = get_day_lessons_for_date(target_dt, v_crs, v_grp, faculty_code=v_fac)
+                            if not v_sat_slots and not v_hws:
+                                vk_cache[v_key] = ('skip', None, [])
+                                continue
+                        vk_cache[v_key] = ('regular', f'{vk_greet}\n\n' + vk_bot.get_day_schedule_plain(target_dt, v_fac, v_crs, v_grp), v_hws if day_offset == 1 else [])
                 v_mode, vk_msg_txt, hw_rows_vk = vk_cache[v_key]
+                if v_mode == 'skip':
+                    continue
                 if v_mode == 'session':
                     if vk_msg_txt:
                         core.enqueue_vk_message(vk_uid, vk_msg_txt)
@@ -1069,7 +1087,7 @@ def _run_scheduled_mailing(day_offset, greeting_line, day_label_genitive, sub_co
 def morning_mailing():
     _run_scheduled_mailing(
         0,
-        '☀️ <b>Доброе утро!</b> Актуальное расписание пар и ДЗ на сегодня:',
+        '☀️🐾 <b>Доброе утро!</b> Куница принесла расписание пар и ДЗ на сегодня:',
         'сегодня',
         sub_column='sub_morning',
     )
@@ -1078,15 +1096,15 @@ def morning_mailing():
 def evening_mailing():
     _run_scheduled_mailing(
         1,
-        '🌙 <b>Добрый вечер!</b> Напоминание о расписании пар и ДЗ на завтра:',
+        '🌙🐾 <b>Добрый вечер!</b> Куница напоминает о парах и ДЗ на завтра:',
         'завтра',
         sub_column='sub_evening',
     )
 
 
 scheduler = BackgroundScheduler(timezone='Asia/Yekaterinburg')
-scheduler.add_job(morning_mailing, 'cron', day_of_week='mon-fri', hour=7, minute=0)
-scheduler.add_job(evening_mailing, 'cron', day_of_week='sun,mon,tue,wed,thu', hour=18, minute=0)
+scheduler.add_job(morning_mailing, 'cron', day_of_week='mon-sat', hour=7, minute=0)
+scheduler.add_job(evening_mailing, 'cron', day_of_week='sun,mon,tue,wed,thu,fri', hour=18, minute=0)
 scheduler.add_job(send_db_backup, 'cron', hour=3, minute=0)
 scheduler.add_job(cleanup_stale_states, 'interval', minutes=30)
 scheduler.add_job(cleanup_old_db_records, 'cron', day_of_week='sun', hour=4, minute=0)

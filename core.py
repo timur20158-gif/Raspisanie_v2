@@ -1811,17 +1811,92 @@ def build_course_keyboard(faculty_code):
     return markup
 
 
+def get_lesson_type_badge(lesson_type):
+    """Возвращает цветовую метку типа занятия: 🟢 ЛК, 🟡 ПЗ/ПР/Сем, 🔴 Лаб/ЛР."""
+    low = str(lesson_type or '').lower()
+    if any(k in low for k in ('лаб', 'лр')):
+        return '🔴'
+    if any(k in low for k in ('пз', 'пр', 'практ', 'сем')):
+        return '🟡'
+    if any(k in low for k in ('лк', 'лекц')):
+        return '🟢'
+    return '📘'
+
+
+def build_progress_bar(current, total, width=10):
+    if total <= 0:
+        return '░' * width + ' 0%'
+    ratio = max(0.0, min(1.0, float(current) / float(total)))
+    filled = int(round(ratio * width))
+    pct = int(round(ratio * 100))
+    return f'[{"▓" * filled}{"░" * (width - filled)}] {pct}%'
+
+
+_MASCOT_TG_FILE_IDS = {}
+_MASCOT_LOCK = threading.Lock()
+
+
+def _find_mascot_file(art_name):
+    for base in (DATA_DIR, BASE_DIR):
+        assets_dir = os.path.join(base, 'assets')
+        for ext in ('.png', '.jpg', '.jpeg', '.webp'):
+            candidate = os.path.join(assets_dir, art_name + ext)
+            if os.path.isfile(candidate):
+                return candidate
+    return None
+
+
+def send_mascot_art(chat_id, art_name, caption_html, reply_markup=None):
+    """Отправляет иллюстрацию маскота (куницы) из папки assets/ с подписью и кэшированием file_id.
+    Если файла нет или подпись длиннее 1024 символов — аккуратно отправляет обычным текстом."""
+    if len(str(caption_html or '')) <= 1024:
+        with _MASCOT_LOCK:
+            cached_fid = _MASCOT_TG_FILE_IDS.get(art_name)
+        if cached_fid:
+            try:
+                return bot.send_photo(
+                    chat_id,
+                    cached_fid,
+                    caption=caption_html,
+                    reply_markup=reply_markup,
+                    parse_mode='HTML',
+                )
+            except Exception:
+                with _MASCOT_LOCK:
+                    _MASCOT_TG_FILE_IDS.pop(art_name, None)
+
+        fpath = _find_mascot_file(art_name)
+        if fpath:
+            try:
+                with open(fpath, 'rb') as img_f:
+                    m = bot.send_photo(
+                        chat_id,
+                        img_f,
+                        caption=caption_html,
+                        reply_markup=reply_markup,
+                        parse_mode='HTML',
+                    )
+                if getattr(m, 'photo', None):
+                    with _MASCOT_LOCK:
+                        _MASCOT_TG_FILE_IDS[art_name] = m.photo[-1].file_id
+                return m
+            except Exception as e_art:
+                print(f'Ошибка отправки арта маскота {art_name}: {e_art}')
+
+    return send_long_html_message(chat_id, caption_html, reply_markup=reply_markup, parse_mode='HTML')
+
+
 def start_onboarding(message):
     sync_username(message.from_user)
     clear_user_state(message.chat.id)
-    bot.send_message(
+    send_mascot_art(
         message.chat.id,
-        '👋 <b>Привет!</b>\n'
-        'Я твой цифровой помощник по расписанию <i>Сибайского института (филиала) УУНиТ</i>.\n'
+        'marten_welcome',
+        '🐾 <b>Привет! Я — Куница-помощник!</b>\n'
+        'Слежу за расписанием, заменами, домашкой и сессией <i>Сибайского института (филиала) УУНиТ</i>.\n'
         f'<i>by @{ADMIN_USERNAME}</i>\n\n'
         '👇 Для начала выбери свой <b>факультет</b>:',
         reply_markup=build_faculty_keyboard(),
-        parse_mode='HTML',
     )
 
 

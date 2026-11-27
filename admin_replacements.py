@@ -18,6 +18,7 @@ from core import (
     atomic_write_json,
     bot,
     build_faculty_keyboard,
+    build_progress_bar,
     calc_week_number_for_start,
     clear_user_state,
     db_connection,
@@ -57,6 +58,7 @@ from core import (
     save_pending_docx_import,
     save_semester_meta,
     send_db_backup,
+    send_mascot_art,
     set_extra_hw_lists_enabled,
     set_session_mode_enabled,
     set_user_state,
@@ -943,7 +945,7 @@ def cmd_remove_starosta(message):
         cursor = conn.cursor()
         if arg.startswith('@'):
             uname_low = arg[1:].lower()
-            cursor.execute('SELECT user_id, subscribed FROM users WHERE LOWER(username) = ? AND is_starosta = 1', (uname_low,))
+            cursor.execute('SELECT user_id, subscribed, faculty, group_name FROM users WHERE LOWER(username) = ? AND is_starosta = 1', (uname_low,))
             affected_users = cursor.fetchall()
             cursor.execute(
                 'UPDATE users SET is_starosta = 0, managed_group = "" WHERE LOWER(username) = ? AND is_starosta = 1',
@@ -951,7 +953,7 @@ def cmd_remove_starosta(message):
             )
         elif arg.isdigit():
             uid_num = int(arg)
-            cursor.execute('SELECT user_id, subscribed FROM users WHERE user_id = ? AND is_starosta = 1', (uid_num,))
+            cursor.execute('SELECT user_id, subscribed, faculty, group_name FROM users WHERE user_id = ? AND is_starosta = 1', (uid_num,))
             affected_users = cursor.fetchall()
             cursor.execute(
                 'UPDATE users SET is_starosta = 0, managed_group = "" WHERE user_id = ? AND is_starosta = 1',
@@ -974,12 +976,16 @@ def cmd_remove_starosta(message):
         return
 
     invalidate_user_cache()
-    for uid_rem, sub_rem in affected_users:
+    for uid_rem, sub_rem, fac_rem, grp_rem in affected_users:
         try:
             bot.send_message(
                 uid_rem,
                 'ℹ️ Роль <b>Старосты</b> была снята администратором. Главное меню обновлено.',
-                reply_markup=get_main_keyboard(bool(sub_rem), is_starosta=False),
+                reply_markup=get_main_keyboard(
+                    bool(sub_rem),
+                    is_starosta=False,
+                    session_mode=is_session_mode_enabled(fac_rem, grp_rem),
+                ),
                 parse_mode='HTML',
             )
         except Exception:
@@ -2778,23 +2784,36 @@ def build_session_view(group_name, faculty_code=None, can_edit=False):
         rows = cursor.fetchall()
 
     upcoming = []
+    total_valid = 0
+    passed_cnt = 0
     for r in rows:
         try:
             d_obj = datetime.strptime(r[1], '%d.%m.%Y').date()
         except ValueError:
             continue
+        total_valid += 1
         if d_obj >= today:
             upcoming.append((d_obj, r))
+        else:
+            passed_cnt += 1
     upcoming.sort(key=lambda x: (x[0], x[1][2] or '', x[1][0]))
+
+    prog_line = ''
+    if total_valid > 0:
+        bar = build_progress_bar(passed_cnt, total_valid, width=10)
+        prog_line = f'\n🐾 <b>Прогресс:</b> <code>{bar}</code> <i>(позади {passed_cnt} из {total_valid})</i>'
 
     text = (
         f'🎓 <b>РАСПИСАНИЕ СЕССИИ</b>\n'
-        f'<blockquote>📚 <b>Группа:</b> {esc(group_name)}</blockquote>\n\n'
+        f'<blockquote>📚 <b>Группа:</b> {esc(group_name)}{prog_line}</blockquote>\n\n'
     )
     markup = InlineKeyboardMarkup(row_width=1)
 
     if not upcoming:
-        text += '✨ <i>Экзамены и зачёты для твоей группы пока не добавлены.</i>'
+        if passed_cnt > 0:
+            text += '🐾 <i>Все экзамены и зачёты позади — Куница поздравляет с закрытой сессией!</i>'
+        else:
+            text += '🐾 <i>Экзамены и зачёты пока не добавлены — Куница на страже, скоро появятся.</i>'
     else:
         for d_obj, (ex_id, ex_date, ex_time, subj, ex_type, teacher, room) in upcoming:
             left_lbl = _format_days_left_label(d_obj, today)
@@ -2835,7 +2854,8 @@ def open_session_menu(message):
         and (get_managed_context(message.from_user)[1] == user[1])
     )
     text, markup = build_session_view(user[1], faculty_code=user[7], can_edit=can_edit)
-    bot.send_message(message.chat.id, text, reply_markup=markup, parse_mode='HTML')
+    art_key = 'marten_grad' if 'поздравляет с закрытой сессией' in text else 'marten_session'
+    send_mascot_art(message.chat.id, art_key, text, reply_markup=markup)
 
 
 def _parse_flexible_session_date(raw_text):
